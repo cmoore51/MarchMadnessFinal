@@ -2,12 +2,21 @@ import { useState, useEffect, useCallback, memo } from 'react';
 import { ROUND_LABELS, REGION_COLORS, PLAYER_COLORS, ADMIN_PASSWORD } from './constants';
 import { getLiveGames } from './api';
 import { makeDemoGames } from './demoData';
+import { storage } from './storage';
 import './index.css';
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
 function didCover(winScore, loseScore, spread) {
   if (spread == null) return null;
   return spread < 0 ? (winScore - loseScore) > Math.abs(spread) : true;
 }
+
+function getColor(players, p) {
+  const i = players.indexOf(p);
+  return i >= 0 ? PLAYER_COLORS[i % PLAYER_COLORS.length] : '#5a6a82';
+}
+
+// ── Components (defined outside App to avoid re-creation on render) ───────────
 
 const PlayerInput = memo(({ value, onChange, onAdd }) => (
   <div className="player-input">
@@ -19,16 +28,241 @@ const PlayerInput = memo(({ value, onChange, onAdd }) => (
   </div>
 ));
 
+function TeamSlot({ team, isWinner, isLoser, showScore, round, players, assignments, ownerAtRound, getOwner, assignTeam, isAdmin, tab, selectedPlayer }) {
+  if (!team) return null;
+  const owner     = round ? ownerAtRound(team.id, round) : getOwner(team.id);
+  const color     = owner ? getColor(players, owner) : '#1e2d42';
+  const captured  = round && owner && assignments[team.id] && owner !== assignments[team.id];
+  const canAssign = isAdmin && tab === 'setup' && selectedPlayer && team.id && team.name !== 'TBD';
+  return (
+    <div onClick={e => { if (canAssign) { e.stopPropagation(); assignTeam(team.id); } }}
+      className={`team-slot${isWinner ? ' team-slot--winner' : ''}${isLoser ? ' team-slot--loser' : ''}${canAssign ? ' team-slot--assignable' : ''}`}
+      style={{ borderLeft: `4px solid ${color}`, cursor: canAssign ? 'pointer' : 'default' }}>
+      <span className="team-slot__seed">{team.seed || '?'}</span>
+      <span className={`team-slot__name${isWinner ? ' team-slot__name--winner' : ''}${isLoser ? ' team-slot__name--loser' : ''}`}>
+        {team.name?.split(' ').slice(0, 2).join(' ') || team.abbr || 'TBD'}
+      </span>
+      {captured && <span className="team-slot__capture" title="Captured">⚡</span>}
+      {owner && <span className="team-slot__owner" style={{ background: color }}>{owner.slice(0, 7)}</span>}
+      {showScore && team.score != null && (
+        <span className={`team-slot__score${isWinner ? ' team-slot__score--winner' : ' team-slot__score--loser'}`}>{team.score}</span>
+      )}
+      {isWinner && <span className="team-slot__arrow">▶</span>}
+    </div>
+  );
+}
+
+function SpreadPopupBody({ game, fixed, spreads, spreadInput, setSpreadInput, saveSpread, clearSpread, closeCard, isAdmin, ownerAtRound }) {
+  const spread     = spreads[game.id] ?? game.spread;
+  const winner     = game.away.winner ? game.away : game.home.winner ? game.home : null;
+  const loser      = winner ? (winner === game.away ? game.home : game.away) : null;
+  const covered    = winner && loser && spread != null ? didCover(winner.score, loser.score, spread) : null;
+  const lOwner     = loser ? ownerAtRound(loser.id, game.round) : null;
+  const captureMsg = covered === false && lOwner ? `⚡ ${lOwner} captures ${winner?.name}!` : null;
+  const hasScores  = game.away.score != null || game.home.score != null;
+  return (
+    <div className={fixed ? 'bracket-popup-overlay' : 'spread-popup'} onClick={e => e.stopPropagation()}>
+      <div className="spread-popup__header">
+        <span className="spread-popup__region" style={{ color: REGION_COLORS[game.region] || '#1a3a6b' }}>
+          {game.region?.toUpperCase()} · {game.roundLabel?.toUpperCase()}
+        </span>
+        <button className="spread-popup__close" onClick={closeCard}>✕</button>
+      </div>
+      <div className="spread-popup__matchup">{game.away.name} vs {game.home.name}</div>
+      {hasScores && <div className="spread-popup__score">{game.away.score} – {game.home.score}</div>}
+      {spread != null && (
+        <div className="spread-popup__info">
+          Spread: <strong>{spread > 0 ? `+${spread}` : spread}</strong>
+          {covered != null && <span style={{ marginLeft: 8, color: covered ? '#1d6534' : '#b91c1c' }}>{covered ? '✓ Covered' : '✗ Not covered'}</span>}
+        </div>
+      )}
+      {captureMsg && <div className="spread-popup__capture">{captureMsg}</div>}
+      <div className="spread-popup__divider">
+        {isAdmin ? (
+          <>
+            <div className="spread-popup__input-label">SET SPREAD · negative = home favored</div>
+            <div className="spread-popup__input-row">
+              <input className="spread-popup__input" type="number" value={spreadInput}
+                onChange={e => setSpreadInput(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') saveSpread(game.id); if (e.key === 'Escape') closeCard(); }}
+                placeholder="e.g. -7 or +5" />
+              <button className="spread-popup__save" onClick={() => saveSpread(game.id)}>✓</button>
+              {spreads[game.id] !== undefined && <button className="spread-popup__clear" onClick={() => clearSpread(game.id)}>✕</button>}
+            </div>
+          </>
+        ) : (
+          <div className="spread-popup__locked">🔒 Spread editing requires admin access</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function GameCard({ game, spreads, focusGame, openCard, closeCard, spreadInput, setSpreadInput, saveSpread, clearSpread, players, assignments, ownerAtRound, getOwnerFn, isAdmin, tab, selectedPlayer, assignTeam }) {
+  const spread     = spreads[game.id] ?? game.spread;
+  const winner     = game.away.winner ? game.away : game.home.winner ? game.home : null;
+  const loser      = winner ? (winner === game.away ? game.home : game.away) : null;
+  const covered    = winner && loser && spread != null ? didCover(winner.score, loser.score, spread) : null;
+  const hasScores  = game.away.score != null || game.home.score != null;
+  const isFocused  = focusGame === game.id;
+  const spreadClass = covered === true ? 'game-card__spread--covered' : covered === false ? 'game-card__spread--uncovered' : 'game-card__spread--neutral';
+  const slotProps  = { players, assignments, ownerAtRound, getOwner: getOwnerFn, assignTeam, isAdmin, tab, selectedPlayer };
+  return (
+    <div className={`game-card${game.inProgress ? ' game-card--live' : ''}`}
+      style={{ borderLeftColor: game.inProgress ? '#16a34a' : REGION_COLORS[game.region] || '#2a3a5a' }}>
+      <div onClick={() => isFocused ? closeCard() : openCard(game)}>
+        <TeamSlot team={game.away} isWinner={game.away.winner} isLoser={game.home.winner} showScore={hasScores} round={game.round} {...slotProps} />
+        <div className="game-card__divider" />
+        <TeamSlot team={game.home} isWinner={game.home.winner} isLoser={game.away.winner} showScore={hasScores} round={game.round} {...slotProps} />
+        <div className="game-card__footer">
+          <span className={`game-card__status${game.inProgress ? ' game-card__status--live' : ''}`}>
+            {game.inProgress ? `● ${game.statusDetail || 'LIVE'}` : game.completed ? 'FINAL' : 'SCHED'}
+          </span>
+          {spread != null
+            ? <span className={`game-card__spread ${spreadClass}`}>{spread > 0 ? `+${spread}` : spread}{covered === true ? ' ✓' : covered === false ? ' ✗' : ''}</span>
+            : <span className="game-card__spread-add">+ spread</span>}
+        </div>
+      </div>
+      {isFocused && <SpreadPopupBody game={game} fixed={false} spreads={spreads} spreadInput={spreadInput} setSpreadInput={setSpreadInput} saveSpread={saveSpread} clearSpread={clearSpread} closeCard={closeCard} isAdmin={isAdmin} ownerAtRound={ownerAtRound} />}
+    </div>
+  );
+}
+
+function MiniSlot({ team, isWinner, isLoser, round, players, assignments, ownerAtRound, getOwnerFn }) {
+  if (!team) return null;
+  const owner    = round ? ownerAtRound(team.id, round) : getOwnerFn(team.id);
+  const color    = owner ? getColor(players, owner) : '#0d1b2a';
+  const captured = round && owner && assignments[team.id] && owner !== assignments[team.id];
+  return (
+    <div className={`mini-slot${isWinner ? ' mini-slot--winner' : ''}${isLoser ? ' mini-slot--loser' : ''}`}
+      style={{ borderLeft: `3px solid ${color}` }}>
+      <span className="mini-slot__seed">{team.seed || '?'}</span>
+      <span className={`mini-slot__name${isWinner ? ' mini-slot__name--winner' : ''}${isLoser ? ' mini-slot__name--loser' : ''}`}>
+        {team.name?.split(' ').slice(0, 2).join(' ') || team.abbr || 'TBD'}
+      </span>
+      {captured && <span className="mini-slot__capture">⚡</span>}
+      {owner && <span className="mini-slot__owner" style={{ background: color }}>{owner.slice(0, 6)}</span>}
+      {team.score != null && <span className={`mini-slot__score${isWinner ? ' mini-slot__score--winner' : ' mini-slot__score--loser'}`}>{team.score}</span>}
+    </div>
+  );
+}
+
+function MiniCard({ game, spreads, focusGame, openCard, closeCard, players, assignments, ownerAtRound, getOwnerFn }) {
+  if (!game) return <div className="mini-card--placeholder" />;
+  const spread   = spreads[game.id] ?? game.spread;
+  const winner   = game.away.winner ? game.away : game.home.winner ? game.home : null;
+  const loser    = winner ? (winner === game.away ? game.home : game.away) : null;
+  const covered  = winner && loser && spread != null ? didCover(winner.score, loser.score, spread) : null;
+  const sc       = covered === true ? 'mini-card__spread--covered' : covered === false ? 'mini-card__spread--uncovered' : 'mini-card__spread--neutral';
+  const isFocused = focusGame === game.id;
+  const slotProps = { players, assignments, ownerAtRound, getOwnerFn };
+  return (
+    <div className={`mini-card${game.inProgress ? ' mini-card--live' : ''}`}
+      onClick={e => { e.stopPropagation(); isFocused ? closeCard() : openCard(game); }}>
+      <MiniSlot team={game.away} isWinner={game.away.winner} isLoser={game.home.winner} round={game.round} {...slotProps} />
+      <div className="game-card__divider" />
+      <MiniSlot team={game.home} isWinner={game.home.winner} isLoser={game.away.winner} round={game.round} {...slotProps} />
+      <div className="mini-card__footer">
+        <span className={`mini-card__status${game.inProgress ? ' mini-card__status--live' : ''}`}>
+          {game.inProgress ? '● LIVE' : game.completed ? 'FINAL' : 'SCHED'}
+        </span>
+        {spread != null
+          ? <span className={`mini-card__spread ${sc}`}>{spread > 0 ? `+${spread}` : spread}{covered === true ? ' ✓' : covered === false ? ' ✗' : ''}</span>
+          : <span className="mini-card__spread mini-card__spread--neutral">+ sprd</span>}
+      </div>
+    </div>
+  );
+}
+
+function BracketColumn({ games, region, round, fp, players, assignments, spreads, focusGame, openCard, closeCard, ownerAtRound, getOwnerFn }) {
+  const rGames   = games.filter(g => g.region === region && g.round === round);
+  const groupSize = Math.pow(2, round - 1);
+  const cardProps = { spreads, focusGame, openCard, closeCard, players, assignments, ownerAtRound, getOwnerFn };
+  return (
+    <div className="bracket-col">
+      {rGames.map(g => {
+        const involved = fp === 'All' || [g.away, g.home].some(t => ownerAtRound(t.id, round) === fp);
+        return (
+          <div key={g.id} className="bracket-col__slot" style={{ flex: groupSize }}>
+            <div className={involved ? 'fade-full' : 'fade-dim'}>
+              <MiniCard game={g} {...cardProps} />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function RegionStrip({ games, region, dir, fp, players, assignments, spreads, focusGame, openCard, closeCard, ownerAtRound, getOwnerFn }) {
+  const rounds        = [1, 2, 3, 4];
+  const orderedRounds = dir === 'ltr' ? rounds : [...rounds].reverse();
+  const colProps      = { games, region, fp, players, assignments, spreads, focusGame, openCard, closeCard, ownerAtRound, getOwnerFn };
+  return (
+    <div className="region-strip">
+      <div className={`region-strip__title${dir === 'rtl' ? ' region-strip__title--right' : ''}`}
+        style={{ color: REGION_COLORS[region], borderBottomColor: REGION_COLORS[region] + '55' }}>
+        {region}
+      </div>
+      <div className="region-strip__rounds">
+        {orderedRounds.map(r => <BracketColumn key={r} round={r} {...colProps} />)}
+      </div>
+    </div>
+  );
+}
+
+function StandingsPanel({ players, scores, eliminationInfo, getColorFn }) {
+  if (players.length === 0) return null;
+  const elim   = eliminationInfo.eliminated;
+  const active = players.filter(p => !elim.includes(p)).sort((a, b) => (scores[b] || 0) - (scores[a] || 0));
+  const firstEliminated = elim[0] || null;
+  return (
+    <div className="standings">
+      <div className="section-title">Standings</div>
+      {active.length === 0 && elim.length === 0 && <div style={{ fontSize: 12, color: '#7a8a9a' }}>No teams assigned yet.</div>}
+      {active.map((p, i) => (
+        <div key={p} className="standings__row">
+          <span className="standings__rank">{i + 1}</span>
+          <span className="standings__dot" style={{ background: getColorFn(p) }} />
+          <span className="standings__name">{p}</span>
+          <span className="standings__score" style={{ color: getColorFn(p) }}>{scores[p] || 0}</span>
+        </div>
+      ))}
+      {elim.length > 0 && (
+        <>
+          <div className="standings__elim-title">Eliminated</div>
+          {elim.map((p, i) => (
+            <div key={p} className="standings__elim-row">
+              <span className="standings__elim-icon">{i === 0 ? '💀' : '✕'}</span>
+              <span className="standings__elim-name">{p}</span>
+              <span className="standings__elim-round">{ROUND_LABELS[eliminationInfo.eliminatedInRound[p]] || `R${eliminationInfo.eliminatedInRound[p]}`}</span>
+            </div>
+          ))}
+        </>
+      )}
+      {firstEliminated && (
+        <div className="standings__first-out">
+          <div className="standings__first-out-label">💀 First Eliminated</div>
+          <div className="standings__first-out-name">{firstEliminated}</div>
+          <div className="standings__first-out-sub">out in {ROUND_LABELS[eliminationInfo.eliminatedInRound[firstEliminated]] || 'Round ?'}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main App ──────────────────────────────────────────────────────────────────
 export default function App() {
-  const [tab, setTab]           = useState('full');
-  const [games, setGames]       = useState([]);
-  const [loading, setLoading]   = useState(true);
+  const [tab, setTab]         = useState('full');
+  const [games, setGames]     = useState([]);
+  const [loading, setLoading] = useState(true);
 
   const [players, setPlayers]               = useState([]);
   const [assignments, setAssignments]       = useState({});
   const [spreads, setSpreads]               = useState({});
   const [selectedPlayer, setSelectedPlayer] = useState(null);
   const [inputValue, setInputValue]         = useState('');
+  const [storageReady, setStorageReady]     = useState(false);
 
   const [activeRegion, setActiveRegion] = useState('All');
   const [filterPlayer, setFilterPlayer] = useState('All');
@@ -40,6 +274,40 @@ export default function App() {
   const [adminInput, setAdminInput]         = useState('');
   const [adminError, setAdminError]         = useState(false);
 
+  // ── Load from storage on mount ─────────────────────────────────────────────
+  useEffect(() => {
+    (async () => {
+      try {
+        const [p, a, s] = await Promise.all([
+          storage.get('bracket:players'),
+          storage.get('bracket:assignments'),
+          storage.get('bracket:spreads'),
+        ]);
+        if (p) setPlayers(JSON.parse(p.value));
+        if (a) setAssignments(JSON.parse(a.value));
+        if (s) setSpreads(JSON.parse(s.value));
+      } catch { /* no saved data yet */ }
+      setStorageReady(true);
+    })();
+  }, []);
+
+  // ── Persist on change ──────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!storageReady) return;
+    storage.set('bracket:players', JSON.stringify(players)).catch(() => {});
+  }, [players, storageReady]);
+
+  useEffect(() => {
+    if (!storageReady) return;
+    storage.set('bracket:assignments', JSON.stringify(assignments)).catch(() => {});
+  }, [assignments, storageReady]);
+
+  useEffect(() => {
+    if (!storageReady) return;
+    storage.set('bracket:spreads', JSON.stringify(spreads)).catch(() => {});
+  }, [spreads, storageReady]);
+
+  // ── Load game data ─────────────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
       try {
@@ -50,7 +318,7 @@ export default function App() {
     })();
   }, []);
 
-  // ── Ownership ──────────────────────────────────────────────────────────────
+  // ── Ownership computation ──────────────────────────────────────────────────
   const ownership = (() => {
     const own = {};
     Object.entries(assignments).forEach(([tid, p]) => { own[tid] = { owner: p, capturedFrom: null }; });
@@ -59,7 +327,7 @@ export default function App() {
       const winner = g.away.winner ? g.away : g.home.winner ? g.home : null;
       const loser  = winner ? (winner === g.away ? g.home : g.away) : null;
       if (!winner || !loser) return;
-      const wOwner  = own[winner.id]?.owner, lOwner = own[loser.id]?.owner;
+      const wOwner = own[winner.id]?.owner, lOwner = own[loser.id]?.owner;
       if (!wOwner && !lOwner) return;
       const covered = didCover(winner.score, loser.score, spreads[g.id] ?? g.spread);
       if (covered === false && lOwner) own[winner.id] = { owner: lOwner, capturedFrom: wOwner || null };
@@ -68,8 +336,8 @@ export default function App() {
     return own;
   })();
 
-  const getOwner = id => ownership[id]?.owner || null;
-  const getColor = p  => { const i = players.indexOf(p); return i >= 0 ? PLAYER_COLORS[i % PLAYER_COLORS.length] : '#5a6a82'; };
+  const getOwnerFn  = useCallback(id => ownership[id]?.owner || null, [ownership]);
+  const getColorFn  = useCallback(p  => getColor(players, p), [players]);
 
   const scores = (() => {
     const s = {};
@@ -112,39 +380,7 @@ export default function App() {
     return { eliminated, eliminatedInRound };
   })();
 
-  const firstEliminated = eliminationInfo.eliminated[0] || null;
-
-  const addPlayer = useCallback(() => {
-    const name = inputValue.trim();
-    if (!name || players.includes(name)) return;
-    setPlayers(prev => [...prev, name]);
-    setInputValue('');
-  }, [inputValue, players]);
-
-  const removePlayer = useCallback(name => {
-    setPlayers(prev => prev.filter(p => p !== name));
-    setAssignments(prev => { const n = { ...prev }; Object.keys(n).forEach(k => { if (n[k] === name) delete n[k]; }); return n; });
-    setSelectedPlayer(prev => prev === name ? null : prev);
-  }, []);
-
-  const assignTeam = useCallback(teamId => {
-    if (!selectedPlayer || !teamId) return;
-    setAssignments(prev => ({ ...prev, [teamId]: selectedPlayer }));
-  }, [selectedPlayer]);
-
-  const allRegions = [...new Set(games.map(g => g.region))].filter(Boolean).sort();
-
-  const teamsByRegion = (() => {
-    const map = {};
-    games.filter(g => g.round === 1 || g.round === 0).forEach(g => {
-      if (!map[g.region]) map[g.region] = [];
-      [g.away, g.home].forEach(t => {
-        if (t.id && t.name !== 'TBD' && !map[g.region].find(x => x.id === t.id)) map[g.region].push(t);
-      });
-    });
-    return map;
-  })();
-
+  // ── ownershipAtRound ───────────────────────────────────────────────────────
   const ownershipAtRound = (() => {
     const snap = { 1: {} };
     Object.entries(assignments).forEach(([tid, p]) => { snap[1][tid] = p; });
@@ -164,13 +400,33 @@ export default function App() {
     return snap;
   })();
 
-  const ownerAtRound = (tid, round) =>
-    ownershipAtRound[round]?.[tid] ?? ownershipAtRound[1]?.[tid] ?? null;
+  const ownerAtRound = useCallback((tid, round) =>
+    ownershipAtRound[round]?.[tid] ?? ownershipAtRound[1]?.[tid] ?? null,
+  [ownershipAtRound]);
 
-  const openCard  = g => { setFocusGame(g.id); setSpreadInput((spreads[g.id] ?? g.spread) != null ? String(spreads[g.id] ?? g.spread) : ''); };
-  const closeCard = () => { setFocusGame(null); setSpreadInput(''); };
-  const saveSpread  = gid => { const v = parseFloat(spreadInput); if (!isNaN(v)) setSpreads(p => ({ ...p, [gid]: v })); closeCard(); };
-  const clearSpread = gid => { setSpreads(p => { const n = { ...p }; delete n[gid]; return n; }); closeCard(); };
+  // ── Actions ────────────────────────────────────────────────────────────────
+  const openCard    = useCallback(g => { setFocusGame(g.id); setSpreadInput((spreads[g.id] ?? g.spread) != null ? String(spreads[g.id] ?? g.spread) : ''); }, [spreads]);
+  const closeCard   = useCallback(() => { setFocusGame(null); setSpreadInput(''); }, []);
+  const saveSpread  = useCallback(gid => { const v = parseFloat(spreadInput); if (!isNaN(v)) setSpreads(p => ({ ...p, [gid]: v })); closeCard(); }, [spreadInput, closeCard]);
+  const clearSpread = useCallback(gid => { setSpreads(p => { const n = { ...p }; delete n[gid]; return n; }); closeCard(); }, [closeCard]);
+
+  const addPlayer = useCallback(() => {
+    const name = inputValue.trim();
+    if (!name || players.includes(name)) return;
+    setPlayers(prev => [...prev, name]);
+    setInputValue('');
+  }, [inputValue, players]);
+
+  const removePlayer = useCallback(name => {
+    setPlayers(prev => prev.filter(p => p !== name));
+    setAssignments(prev => { const n = { ...prev }; Object.keys(n).forEach(k => { if (n[k] === name) delete n[k]; }); return n; });
+    setSelectedPlayer(prev => prev === name ? null : prev);
+  }, []);
+
+  const assignTeam = useCallback(teamId => {
+    if (!selectedPlayer || !teamId) return;
+    setAssignments(prev => ({ ...prev, [teamId]: selectedPlayer }));
+  }, [selectedPlayer]);
 
   const tryUnlock = () => {
     if (adminInput === ADMIN_PASSWORD) { setIsAdmin(true); setShowAdminLogin(false); setAdminInput(''); setAdminError(false); }
@@ -178,245 +434,39 @@ export default function App() {
   };
   const lock = () => { setIsAdmin(false); setShowAdminLogin(false); setAdminInput(''); setAdminError(false); setTab('full'); };
 
-  // ── Shared card components ─────────────────────────────────────────────────
+  const resetEverything = () => {
+    setPlayers([]); setAssignments({}); setSpreads({});
+    ['bracket:players', 'bracket:assignments', 'bracket:spreads']
+      .forEach(k => storage.delete(k).catch(() => {}));
+  };
 
-  function TeamSlot({ team, isWinner, isLoser, showScore, round }) {
-    if (!team) return null;
-    const owner    = round ? ownerAtRound(team.id, round) : getOwner(team.id);
-    const color    = owner ? getColor(owner) : '#1e2d42';
-    const captured = round && owner && assignments[team.id] && owner !== assignments[team.id];
-    const canAssign = isAdmin && tab === 'setup' && selectedPlayer && team.id && team.name !== 'TBD';
-    return (
-      <div onClick={e => { if (canAssign) { e.stopPropagation(); assignTeam(team.id); } }}
-        className={`team-slot${isWinner ? ' team-slot--winner' : ''}${isLoser ? ' team-slot--loser' : ''}${canAssign ? ' team-slot--assignable' : ''}`}
-        style={{ borderLeft: `4px solid ${color}`, cursor: canAssign ? 'pointer' : 'default' }}>
-        <span className="team-slot__seed">{team.seed || '?'}</span>
-        <span className={`team-slot__name${isWinner ? ' team-slot__name--winner' : ''}${isLoser ? ' team-slot__name--loser' : ''}`}>
-          {team.name?.split(' ').slice(0, 2).join(' ') || team.abbr || 'TBD'}
-        </span>
-        {captured && <span className="team-slot__capture" title="Captured">⚡</span>}
-        {owner && <span className="team-slot__owner" style={{ background: color }}>{owner.slice(0, 7)}</span>}
-        {showScore && team.score != null && (
-          <span className={`team-slot__score${isWinner ? ' team-slot__score--winner' : ' team-slot__score--loser'}`}>{team.score}</span>
-        )}
-        {isWinner && <span className="team-slot__arrow">▶</span>}
-      </div>
-    );
-  }
+  // ── Derived data ───────────────────────────────────────────────────────────
+  const allRegions = [...new Set(games.map(g => g.region))].filter(Boolean).sort();
+  const ff         = games.filter(g => g.round === 5);
+  const champ      = games.filter(g => g.round === 6);
+  const focusedGame = games.find(g => g.id === focusGame);
 
-  function SpreadPopupBody({ game, fixed = false }) {
-    const spread  = spreads[game.id] ?? game.spread;
-    const winner  = game.away.winner ? game.away : game.home.winner ? game.home : null;
-    const loser   = winner ? (winner === game.away ? game.home : game.away) : null;
-    const covered = winner && loser && spread != null ? didCover(winner.score, loser.score, spread) : null;
-    const lOwner  = loser ? ownerAtRound(loser.id, game.round) : null;
-    const captureMsg = covered === false && lOwner ? `⚡ ${lOwner} captures ${winner?.name}!` : null;
-    const hasScores  = game.away.score != null || game.home.score != null;
-    return (
-      <div className={fixed ? 'bracket-popup-overlay' : 'spread-popup'} onClick={e => e.stopPropagation()}>
-        <div className="spread-popup__header">
-          <span className="spread-popup__region" style={{ color: REGION_COLORS[game.region] || '#1a3a6b' }}>
-            {game.region?.toUpperCase()} · {game.roundLabel?.toUpperCase()}
-          </span>
-          <button className="spread-popup__close" onClick={closeCard}>✕</button>
-        </div>
-        <div className="spread-popup__matchup">{game.away.name} vs {game.home.name}</div>
-        {hasScores && <div className="spread-popup__score">{game.away.score} – {game.home.score}</div>}
-        {spread != null && (
-          <div className="spread-popup__info">
-            Spread: <strong>{spread > 0 ? `+${spread}` : spread}</strong>
-            {covered != null && <span style={{ marginLeft: 8, color: covered ? '#1d6534' : '#b91c1c' }}>{covered ? '✓ Covered' : '✗ Not covered'}</span>}
-          </div>
-        )}
-        {captureMsg && <div className="spread-popup__capture">{captureMsg}</div>}
-        <div className="spread-popup__divider">
-          {isAdmin ? (
-            <>
-              <div className="spread-popup__input-label">SET SPREAD · negative = home favored</div>
-              <div className="spread-popup__input-row">
-                <input className="spread-popup__input" type="number" value={spreadInput}
-                  onChange={e => setSpreadInput(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter') saveSpread(game.id); if (e.key === 'Escape') closeCard(); }}
-                  placeholder="e.g. -7 or +5" />
-                <button className="spread-popup__save" onClick={() => saveSpread(game.id)}>✓</button>
-                {spreads[game.id] !== undefined && <button className="spread-popup__clear" onClick={() => clearSpread(game.id)}>✕</button>}
-              </div>
-            </>
-          ) : (
-            <div className="spread-popup__locked">🔒 Spread editing requires admin access</div>
-          )}
-        </div>
-      </div>
-    );
-  }
+  const teamsByRegion = (() => {
+    const map = {};
+    games.filter(g => g.round === 1 || g.round === 0).forEach(g => {
+      if (!map[g.region]) map[g.region] = [];
+      [g.away, g.home].forEach(t => {
+        if (t.id && t.name !== 'TBD' && !map[g.region].find(x => x.id === t.id)) map[g.region].push(t);
+      });
+    });
+    return map;
+  })();
 
-  function GameCard({ game }) {
-    const spread  = spreads[game.id] ?? game.spread;
-    const winner  = game.away.winner ? game.away : game.home.winner ? game.home : null;
-    const loser   = winner ? (winner === game.away ? game.home : game.away) : null;
-    const covered = winner && loser && spread != null ? didCover(winner.score, loser.score, spread) : null;
-    const hasScores  = game.away.score != null || game.home.score != null;
-    const isFocused  = focusGame === game.id;
-    const spreadClass = covered === true ? 'game-card__spread--covered' : covered === false ? 'game-card__spread--uncovered' : 'game-card__spread--neutral';
-    return (
-      <div className={`game-card${game.inProgress ? ' game-card--live' : ''}`}
-        style={{ borderLeftColor: game.inProgress ? '#16a34a' : REGION_COLORS[game.region] || '#2a3a5a' }}>
-        <div onClick={() => isFocused ? closeCard() : openCard(game)}>
-          <TeamSlot team={game.away} isWinner={game.away.winner} isLoser={game.home.winner} showScore={hasScores} round={game.round} />
-          <div className="game-card__divider" />
-          <TeamSlot team={game.home} isWinner={game.home.winner} isLoser={game.away.winner} showScore={hasScores} round={game.round} />
-          <div className="game-card__footer">
-            <span className={`game-card__status${game.inProgress ? ' game-card__status--live' : ''}`}>
-              {game.inProgress ? `● ${game.statusDetail || 'LIVE'}` : game.completed ? 'FINAL' : 'SCHED'}
-            </span>
-            {spread != null
-              ? <span className={`game-card__spread ${spreadClass}`}>{spread > 0 ? `+${spread}` : spread}{covered === true ? ' ✓' : covered === false ? ' ✗' : ''}</span>
-              : <span className="game-card__spread-add">+ spread</span>}
-          </div>
-        </div>
-        {isFocused && <SpreadPopupBody game={game} />}
-      </div>
-    );
-  }
-
-  // ── Mini card for full bracket ─────────────────────────────────────────────
-
-  function MiniSlot({ team, isWinner, isLoser, round }) {
-    if (!team) return null;
-    const owner    = round ? ownerAtRound(team.id, round) : getOwner(team.id);
-    const color    = owner ? getColor(owner) : '#0d1b2a';
-    const captured = round && owner && assignments[team.id] && owner !== assignments[team.id];
-    return (
-      <div className={`mini-slot${isWinner ? ' mini-slot--winner' : ''}${isLoser ? ' mini-slot--loser' : ''}`}
-        style={{ borderLeft: `3px solid ${color}` }}>
-        <span className="mini-slot__seed">{team.seed || '?'}</span>
-        <span className={`mini-slot__name${isWinner ? ' mini-slot__name--winner' : ''}${isLoser ? ' mini-slot__name--loser' : ''}`}>
-          {team.name?.split(' ').slice(0, 2).join(' ') || team.abbr || 'TBD'}
-        </span>
-        {captured && <span className="mini-slot__capture">⚡</span>}
-        {owner && <span className="mini-slot__owner" style={{ background: color }}>{owner.slice(0, 6)}</span>}
-        {team.score != null && <span className={`mini-slot__score${isWinner ? ' mini-slot__score--winner' : ' mini-slot__score--loser'}`}>{team.score}</span>}
-      </div>
-    );
-  }
-
-  function MiniCard({ game }) {
-    if (!game) return <div className="mini-card--placeholder" />;
-    const spread  = spreads[game.id] ?? game.spread;
-    const winner  = game.away.winner ? game.away : game.home.winner ? game.home : null;
-    const loser   = winner ? (winner === game.away ? game.home : game.away) : null;
-    const covered = winner && loser && spread != null ? didCover(winner.score, loser.score, spread) : null;
-    const sc = covered === true ? 'mini-card__spread--covered' : covered === false ? 'mini-card__spread--uncovered' : 'mini-card__spread--neutral';
-    const isFocused = focusGame === game.id;
-    return (
-      <div className={`mini-card${game.inProgress ? ' mini-card--live' : ''}`}
-        onClick={e => { e.stopPropagation(); isFocused ? closeCard() : openCard(game); }}>
-        <MiniSlot team={game.away} isWinner={game.away.winner} isLoser={game.home.winner} round={game.round} />
-        <div className="game-card__divider" />
-        <MiniSlot team={game.home} isWinner={game.home.winner} isLoser={game.away.winner} round={game.round} />
-        <div className="mini-card__footer">
-          <span className={`mini-card__status${game.inProgress ? ' mini-card__status--live' : ''}`}>
-            {game.inProgress ? '● LIVE' : game.completed ? 'FINAL' : 'SCHED'}
-          </span>
-          {spread != null
-            ? <span className={`mini-card__spread ${sc}`}>{spread > 0 ? `+${spread}` : spread}{covered === true ? ' ✓' : covered === false ? ' ✗' : ''}</span>
-            : <span className="mini-card__spread mini-card__spread--neutral">+ sprd</span>}
-        </div>
-      </div>
-    );
-  }
-
-  // ── Full bracket: flexbox-based column layout ──────────────────────────────
-  // Each round is a flex column. Games are spaced using flex-grow spacers so
-  // that R2 games sit centered between their two R1 feeders, with no absolute
-  // positioning needed at all.
-
-  function BracketColumn({ region, round, dir, fp = 'All' }) {
-    const rGames = games.filter(g => g.region === region && g.round === round);
-    // Number of R1 games fed into each game at this round
-    const groupSize = Math.pow(2, round - 1); // R1=1, R2=2, R3=4, R4=8
-    return (
-      <div className="bracket-col">
-        {rGames.map((g, i) => {
-          const involved = fp === 'All' || [g.away, g.home].some(t => ownerAtRound(t.id, round) === fp);
-          return (
-            <div key={g.id} className="bracket-col__slot" style={{ flex: groupSize }}>
-              <div className={involved ? 'fade-full' : 'fade-dim'}>
-                <MiniCard game={g} />
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    );
-  }
-
-  // A single region rendered as a row of round-columns
-  function RegionStrip({ region, dir, fp = 'All' }) {
-    const rounds = [1, 2, 3, 4];
-    const orderedRounds = dir === 'ltr' ? rounds : [...rounds].reverse();
-    return (
-      <div className="region-strip">
-        <div className={`region-strip__title${dir === 'rtl' ? ' region-strip__title--right' : ''}`}
-          style={{ color: REGION_COLORS[region], borderBottomColor: REGION_COLORS[region] + '55' }}>
-          {region}
-        </div>
-        <div className="region-strip__rounds">
-          {orderedRounds.map(r => (
-            <BracketColumn key={r} region={region} round={r} dir={dir} fp={fp} />
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  function StandingsPanel() {
-    if (players.length === 0) return null;
-    const elim   = eliminationInfo.eliminated;
-    const active = players.filter(p => !elim.includes(p)).sort((a, b) => (scores[b] || 0) - (scores[a] || 0));
-    return (
-      <div className="standings">
-        <div className="section-title">Standings</div>
-        {active.length === 0 && elim.length === 0 && <div style={{ fontSize: 12, color: '#7a8a9a' }}>No teams assigned yet.</div>}
-        {active.map((p, i) => (
-          <div key={p} className="standings__row">
-            <span className="standings__rank">{i + 1}</span>
-            <span className="standings__dot" style={{ background: getColor(p) }} />
-            <span className="standings__name">{p}</span>
-            <span className="standings__score" style={{ color: getColor(p) }}>{scores[p] || 0}</span>
-          </div>
-        ))}
-        {elim.length > 0 && (
-          <>
-            <div className="standings__elim-title">Eliminated</div>
-            {elim.map((p, i) => (
-              <div key={p} className="standings__elim-row">
-                <span className="standings__elim-icon">{i === 0 ? '💀' : '✕'}</span>
-                <span className="standings__elim-name">{p}</span>
-                <span className="standings__elim-round">{ROUND_LABELS[eliminationInfo.eliminatedInRound[p]] || `R${eliminationInfo.eliminatedInRound[p]}`}</span>
-              </div>
-            ))}
-          </>
-        )}
-        {firstEliminated && (
-          <div className="standings__first-out">
-            <div className="standings__first-out-label">💀 First Eliminated</div>
-            <div className="standings__first-out-name">{firstEliminated}</div>
-            <div className="standings__first-out-sub">out in {ROUND_LABELS[eliminationInfo.eliminatedInRound[firstEliminated]] || 'Round ?'}</div>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // ── Render ─────────────────────────────────────────────────────────────────
-  const ff    = games.filter(g => g.round === 5);
-  const champ = games.filter(g => g.round === 6);
   const displayRegions = activeRegion === 'All'
     ? (allRegions.length > 0 ? allRegions : ['South', 'East', 'West', 'Midwest'])
     : [activeRegion];
-  const focusedGame = games.find(g => g.id === focusGame);
 
+  // Shared props bundles to avoid repetition
+  const cardProps = { spreads, focusGame, openCard, closeCard, spreadInput, setSpreadInput, saveSpread, clearSpread, players, assignments, ownerAtRound, getOwnerFn, isAdmin };
+  const miniProps = { spreads, focusGame, openCard, closeCard, players, assignments, ownerAtRound, getOwnerFn };
+  const stripProps = { games, fp: filterPlayer, players, assignments, spreads, focusGame, openCard, closeCard, ownerAtRound, getOwnerFn };
+
+  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="app" onClick={() => { if (focusGame) closeCard(); }}>
 
@@ -472,8 +522,9 @@ export default function App() {
                   </div>
                 );
               })}
-              {selectedPlayer && <div className="player-hint">Click a team to assign to <strong style={{ color: getColor(selectedPlayer) }}>{selectedPlayer}</strong></div>}
-              {Object.keys(assignments).length > 0 && <button className="clear-btn" onClick={() => setAssignments({})}>Clear All Assignments</button>}
+              {selectedPlayer && <div className="player-hint">Click a team to assign to <strong style={{ color: getColorFn(selectedPlayer) }}>{selectedPlayer}</strong></div>}
+              {Object.keys(assignments).length > 0 && <button className="clear-btn" onClick={() => setAssignments({})}>Clear Assignments</button>}
+              {players.length > 0 && <button className="clear-btn" style={{ marginTop: 6 }} onClick={resetEverything}>Reset Everything</button>}
             </div>
             <div>
               <div className="section-title">Assign Teams</div>
@@ -490,7 +541,7 @@ export default function App() {
                     <div className="teams-grid__chips">
                       {teamsByRegion[region].sort((a, b) => (a.seed || 99) - (b.seed || 99)).map(team => {
                         const owner   = assignments[team.id];
-                        const color   = owner ? getColor(owner) : '#0d1b2a';
+                        const color   = owner ? getColorFn(owner) : '#0d1b2a';
                         const blocked = !!selectedPlayer && !owner && alreadyHere;
                         return (
                           <div key={team.id} className="team-chip"
@@ -508,7 +559,7 @@ export default function App() {
             </div>
             <div>
               <div className="section-title">Live Standings</div>
-              <StandingsPanel />
+              <StandingsPanel players={players} scores={scores} eliminationInfo={eliminationInfo} getColorFn={getColorFn} />
             </div>
           </div>
         </div>
@@ -576,7 +627,11 @@ export default function App() {
                       <div className="round-col__games">
                         {games.filter(g => g.region === region && g.round === round).map(g => {
                           const involved = filterPlayer === 'All' || [g.away, g.home].some(t => ownerAtRound(t.id, round) === filterPlayer);
-                          return <div key={g.id} className={involved ? 'fade-full' : 'fade-dim'}><GameCard game={g} /></div>;
+                          return (
+                            <div key={g.id} className={involved ? 'fade-full' : 'fade-dim'}>
+                              <GameCard game={g} tab={tab} selectedPlayer={selectedPlayer} assignTeam={assignTeam} {...cardProps} />
+                            </div>
+                          );
                         })}
                       </div>
                     </div>
@@ -585,7 +640,9 @@ export default function App() {
               </div>
             ))}
           </div>
-          <div className="bracket-sidebar"><StandingsPanel /></div>
+          <div className="bracket-sidebar">
+            <StandingsPanel players={players} scores={scores} eliminationInfo={eliminationInfo} getColorFn={getColorFn} />
+          </div>
         </div>
       )}
 
@@ -607,32 +664,32 @@ export default function App() {
           </div>
 
           <div className="full-bracket__layout">
-            {/* Left half: South on top, West below */}
             <div className="bracket-half">
-              <RegionStrip region="South" dir="ltr" fp={filterPlayer} />
-              <RegionStrip region="West"  dir="ltr" fp={filterPlayer} />
+              <RegionStrip region="South" dir="ltr" {...stripProps} />
+              <RegionStrip region="West"  dir="ltr" {...stripProps} />
             </div>
 
-            {/* Center: Final Four + Championship */}
             <div className="bracket-center">
               <div className="bracket-center__label bracket-center__label--ff">Final Four</div>
-              {ff[0] && <div className={filterPlayer === 'All' || [ff[0].away, ff[0].home].some(t => ownerAtRound(t.id, 5) === filterPlayer) ? 'fade-full' : 'fade-dim'}><MiniCard game={ff[0]} /></div>}
+              {ff[0] && <div className={filterPlayer === 'All' || [ff[0].away, ff[0].home].some(t => ownerAtRound(t.id, 5) === filterPlayer) ? 'fade-full' : 'fade-dim'}><MiniCard game={ff[0]} {...miniProps} /></div>}
               <div className="bracket-center__spacer" />
               <div className="bracket-center__label bracket-center__label--champ">🏆 Championship</div>
-              {champ[0] && <div className={filterPlayer === 'All' || [champ[0].away, champ[0].home].some(t => ownerAtRound(t.id, 6) === filterPlayer) ? 'fade-full' : 'fade-dim'}><MiniCard game={champ[0]} /></div>}
+              {champ[0] && <div className={filterPlayer === 'All' || [champ[0].away, champ[0].home].some(t => ownerAtRound(t.id, 6) === filterPlayer) ? 'fade-full' : 'fade-dim'}><MiniCard game={champ[0]} {...miniProps} /></div>}
               <div className="bracket-center__spacer" />
-              {ff[1] && <div className={filterPlayer === 'All' || [ff[1].away, ff[1].home].some(t => ownerAtRound(t.id, 5) === filterPlayer) ? 'fade-full' : 'fade-dim'}><MiniCard game={ff[1]} /></div>}
+              {ff[1] && <div className={filterPlayer === 'All' || [ff[1].away, ff[1].home].some(t => ownerAtRound(t.id, 5) === filterPlayer) ? 'fade-full' : 'fade-dim'}><MiniCard game={ff[1]} {...miniProps} /></div>}
             </div>
 
-            {/* Right half: East on top, Midwest below */}
             <div className="bracket-half">
-              <RegionStrip region="East"    dir="rtl" fp={filterPlayer} />
-              <RegionStrip region="Midwest" dir="rtl" fp={filterPlayer} />
+              <RegionStrip region="East"    dir="rtl" {...stripProps} />
+              <RegionStrip region="Midwest" dir="rtl" {...stripProps} />
             </div>
           </div>
 
-          {/* Centered popup for full bracket */}
-          {focusedGame && <SpreadPopupBody game={focusedGame} fixed />}
+          {focusedGame && (
+            <SpreadPopupBody game={focusedGame} fixed spreads={spreads} spreadInput={spreadInput}
+              setSpreadInput={setSpreadInput} saveSpread={saveSpread} clearSpread={clearSpread}
+              closeCard={closeCard} isAdmin={isAdmin} ownerAtRound={ownerAtRound} />
+          )}
         </div>
       )}
     </div>
