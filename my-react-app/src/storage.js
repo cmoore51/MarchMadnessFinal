@@ -1,38 +1,44 @@
-// Thin wrapper around localStorage that matches the window.storage API shape
-// used in the Claude artifact environment. Falls back to localStorage in a
-// real browser so the app works both locally and in production.
+import { createClient } from '@supabase/supabase-js';
 
-const PREFIX = 'march_madness_';
+const SUPABASE_URL = 'https://rbkdpnvflajltfryszag.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_DpEloHY4HjVQkmo0aIuyIQ_LY9Tuhj7';
 
-const localAdapter = {
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+export const storage = {
   async get(key) {
-    try {
-      const value = localStorage.getItem(PREFIX + key);
-      return value != null ? { key, value } : null;
-    } catch { return null; }
+    const { data, error } = await supabase
+      .from('bracket_state')
+      .select('value')
+      .eq('key', key)
+      .single();
+    if (error || !data) return null;
+    return { key, value: data.value };
   },
+
   async set(key, value) {
-    try {
-      localStorage.setItem(PREFIX + key, value);
-      return { key, value };
-    } catch { return null; }
+    const { error } = await supabase
+      .from('bracket_state')
+      .upsert({ key, value }, { onConflict: 'key' });
+    if (error) return null;
+    return { key, value };
   },
+
   async delete(key) {
-    try {
-      localStorage.removeItem(PREFIX + key);
-      return { key, deleted: true };
-    } catch { return null; }
+    const { error } = await supabase
+      .from('bracket_state')
+      .delete()
+      .eq('key', key);
+    if (error) return null;
+    return { key, deleted: true };
   },
+
   async list(prefix = '') {
-    try {
-      const keys = Object.keys(localStorage)
-        .filter(k => k.startsWith(PREFIX + prefix))
-        .map(k => k.slice(PREFIX.length));
-      return { keys };
-    } catch { return { keys: [] }; }
+    const { data, error } = await supabase
+      .from('bracket_state')
+      .select('key')
+      .like('key', `${prefix}%`);
+    if (error || !data) return { keys: [] };
+    return { keys: data.map(r => r.key) };
   },
 };
-
-export const storage = typeof window !== 'undefined' && window.storage
-  ? window.storage   // Claude artifact environment
-  : localAdapter;    // Local dev / production

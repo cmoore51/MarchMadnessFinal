@@ -4,6 +4,13 @@ import { getLiveGames } from './api';
 import { makeDemoGames } from './demoData';
 import { storage } from './storage';
 import './index.css';
+import { createClient } from '@supabase/supabase-js'
+
+// Vite uses import.meta.env to access environment variables
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey)
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function didCover(winScore, loseScore, spread) {
