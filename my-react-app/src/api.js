@@ -3,17 +3,19 @@ import { ROUND_LABELS } from './constants';
 // ── Switch dates here when 2026 tournament begins ─────────────────────────
 const ESPN_URL =
   "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard" +
-  "?dates=20250318-20250408&groups=50&limit=500";
-// 2026: "?dates=20260318-20260408&groups=50&limit=500"
+  "?dates=20250201-20250501&groups=50&limit=500";
+// 2026: "?dates=20260201-20260501&groups=50&limit=500"
 
 function inferRound(note) {
   const n = note.toLowerCase();
-  if (n.includes("first round")  || n.includes("1st round"))          return 1;
-  if (n.includes("second round") || n.includes("2nd round"))          return 2;
-  if (n.includes("sweet 16")     || n.includes("regional semifinal")) return 3;
-  if (n.includes("elite 8")      || n.includes("regional final"))     return 4;
-  if (n.includes("final four"))                                        return 5;
-  if (n.includes("national championship") || /\bchampionship\s*$/.test(n)) return 6;
+  if (n.includes("Men's Basketball Championship")) {
+    if (n.includes("first round")  || n.includes("1st round"))          return 1;
+    if (n.includes("second round") || n.includes("2nd round"))          return 2;
+    if (n.includes("sweet 16")     || n.includes("regional semifinal")) return 3;
+    if (n.includes("elite 8")      || n.includes("regional final"))     return 4;
+    if (n.includes("final four"))                                        return 5;
+    if (n.includes("national championship") || /\bchampionship\s*$/.test(n)) return 6;
+  }
   return 1;
 }
 
