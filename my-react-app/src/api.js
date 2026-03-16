@@ -3,7 +3,7 @@ import { ROUND_LABELS } from './constants';
 // ── Switch dates here when 2026 tournament begins ─────────────────────────
 const ESPN_URL =
   "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard" +
-  "?dates=20250201-20250501&groups=50&limit=500";
+  "?dates=20260201-20260501&groups=50&limit=500";
 // 2026: "?dates=20260201-20260501&groups=50&limit=500"
 
 function inferRound(note) {
