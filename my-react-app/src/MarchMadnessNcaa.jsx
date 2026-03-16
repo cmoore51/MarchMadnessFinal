@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, memo } from 'react';
+import { useState, useEffect, useCallback, useRef, memo } from 'react';
 import { ROUND_LABELS, REGION_COLORS, PLAYER_COLORS, ADMIN_PASSWORD } from './constants';
 import { getLiveGames } from './api2';
 import { makeDemoGames } from './demoData';
@@ -454,6 +454,27 @@ export default function App() {
   const [adminInput, setAdminInput]         = useState('');
   const [adminError, setAdminError]         = useState(false);
 
+  // ── Header + filter bar height measurement ────────────────────────────────
+  const headerRef = useRef(null);
+  const filterRef = useRef(null);
+  const [headerHeight, setHeaderHeight] = useState(100); // generous default prevents flash
+  const [filterHeight, setFilterHeight] = useState(54);  // generous default
+
+  useEffect(() => {
+    const observe = (el, setter) => {
+      if (!el) return () => {};
+      const ro = new ResizeObserver(() => {
+        setter(el.getBoundingClientRect().height);
+      });
+      ro.observe(el);
+      setter(el.getBoundingClientRect().height);
+      return () => ro.disconnect();
+    };
+    const d1 = observe(headerRef.current, setHeaderHeight);
+    const d2 = observe(filterRef.current,  setFilterHeight);
+    return () => { d1(); d2(); };
+  }, []);
+
   // ── Storage ────────────────────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
@@ -660,10 +681,10 @@ export default function App() {
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
-    <div className="app" onClick={() => { if (focusGame) closeCard(); }}>
+    <div className="app" style={{ paddingTop: headerHeight }} onClick={() => { if (focusGame) closeCard(); }}>
 
       {/* ── Header ── */}
-      <header className="header">
+      <header className="header" ref={headerRef}>
         <div className="header__brand">
           <div className="header__title">🏀 March Madness 2026</div>
           <div className="header__subtitle">Spread Bracket</div>
@@ -815,10 +836,10 @@ export default function App() {
 
       {/* ── BRACKET TAB ── */}
       {tab === 'bracket' && (
-        <div className="bracket-page">
+        <div className="bracket-page" style={{ paddingTop: filterHeight }}>
 
           {/* Filter bar: outside the scroll container so it spans full viewport width */}
-          <div className="bracket-filters">
+          <div className="bracket-filters" ref={filterRef} style={{ top: headerHeight }}>
             {['All', ...BRACKET_REGIONS].map(r => (
               <button key={r} onClick={e => { e.stopPropagation(); setActiveRegion(r); }}
                 className={`region-btn${activeRegion === r ? ' region-btn--active' : ''}`}
