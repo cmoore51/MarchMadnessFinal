@@ -277,7 +277,7 @@ function GameCard({ game, spreads, focusGame, openCard, closeCard, spreadInput, 
         <TeamSlot team={game.home} isWinner={!isTBD && game.home.winner} isLoser={!isTBD && game.away.winner} showScore={hasScores} round={game.round} {...slotProps} />
         <div className="game-card__footer">
           <span className={['game-card__status', game.inProgress && 'game-card__status--live', isTBD && 'game-card__status--tbd'].filter(Boolean).join(' ')}>
-            {isTBD ? 'TBD' : (game.inProgress ? `● ${game.statusDetail || 'LIVE'}` : game.completed ? 'FINAL' : 'SCHED')}
+            {isTBD ? 'TBD' : game.inProgress ? `● ${game.statusDetail || 'LIVE'}` : game.completed ? 'FINAL' : (game.gameTime ?? game.statusDetail ?? 'SCHED')}
           </span>
           {!isTBD && (spread != null
             ? <span className={`game-card__spread ${spreadClass}`}>{spread > 0 ? `+${spread}` : spread}{covered === true ? ' ✓' : covered === false ? ' ✗' : ''}</span>
@@ -335,7 +335,7 @@ function MiniCard({ game, spreads, focusGame, openCard, closeCard, players, assi
       <MiniSlot team={game.home} isWinner={!isTBD && game.home.winner} isLoser={!isTBD && game.away.winner} round={game.round} {...slotProps} />
       <div className="mini-card__footer">
         <span className={['mini-card__status', game.inProgress && 'mini-card__status--live', isTBD && 'mini-card__status--tbd'].filter(Boolean).join(' ')}>
-          {isTBD ? 'TBD' : (game.inProgress ? '● LIVE' : game.completed ? 'FINAL' : 'SCHED')}
+          {isTBD ? 'TBD' : game.inProgress ? `● ${game.statusDetail || 'LIVE'}` : game.completed ? 'FINAL' : (game.gameTime ?? game.statusDetail ?? 'SCHED')}
         </span>
         {!isTBD && (spread != null
           ? <span className={`mini-card__spread ${sc}`}>{spread > 0 ? `+${spread}` : spread}{covered === true ? ' ✓' : covered === false ? ' ✗' : ''}</span>

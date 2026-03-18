@@ -275,8 +275,8 @@ input, select { font-family: inherit; }
   border-top: 1px solid var(--border);
   border-radius: 0 0 var(--radius) var(--radius);
 }
-.game-card__status           { font-family: 'Barlow Condensed', sans-serif; font-size: 10px; letter-spacing: 1px; color: var(--text3); text-transform: uppercase; font-weight: 600; }
-.game-card__status--live     { color: var(--green); font-weight: 700; }
+.game-card__status           { font-family: 'Barlow Condensed', sans-serif; font-size: 10px; letter-spacing: 0; color: var(--text3); text-transform: none; font-weight: 600; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; max-width: 110px; }
+.game-card__status--live     { color: var(--green); font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
 .game-card__status--tbd      { color: var(--text3); font-style: italic; }
 .game-card__spread           { font-family: 'Barlow Condensed', sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 0.5px; }
 .game-card__spread--covered   { color: var(--green); }
@@ -383,8 +383,8 @@ input, select { font-family: inherit; }
   background: var(--bg3);
   border-top: 1px solid var(--border);
 }
-.mini-card__status           { font-family: 'Barlow Condensed', sans-serif; font-size: 9px; letter-spacing: 1px; color: var(--text3); text-transform: uppercase; font-weight: 600; }
-.mini-card__status--live     { color: var(--green); font-weight: 700; }
+.mini-card__status           { font-family: 'Barlow Condensed', sans-serif; font-size: 9px; letter-spacing: 0; color: var(--text3); text-transform: none; font-weight: 600; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; max-width: 90px; }
+.mini-card__status--live     { color: var(--green); font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
 .mini-card__status--tbd      { color: var(--text3); font-style: italic; }
 .mini-card__spread           { font-family: 'Barlow Condensed', sans-serif; font-size: 10px; font-weight: 700; }
 .mini-card__spread--covered   { color: var(--green); }
