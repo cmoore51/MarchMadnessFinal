@@ -127,6 +127,56 @@ function formatLiveClock(status) {
   return 'LIVE';
 }
 
+// ─── ESPN: Live clock (today only, very fast — 1 request) ───────────────────
+// ESPN's scoreboard includes displayClock ("14:32") and period (1/2) for
+// in-progress games. We fetch just today's date since that's all we need.
+// Returns a map of { espnId → { clock, period } }
+
+async function fetchESPNLiveClock() {
+  const today = new Date();
+  const ds = today.toISOString().split('T')[0].replace(/-/g, '');
+  try {
+    const url = `https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=${ds}&groups=100&limit=50`;
+    const data = await fetch(url).then(r => r.json()).catch(() => ({}));
+    const clocks = {};
+    for (const ev of (data.events ?? [])) {
+      const comp = ev.competitions?.[0];
+      if (!comp) continue;
+      const state = comp.status?.type?.state ?? 'pre';
+      if (state !== 'in') continue; // only care about live games
+      const clock  = comp.status?.displayClock ?? null;  // e.g. "14:32"
+      const period = comp.status?.period ?? null;         // 1 or 2
+      const desc   = (comp.status?.type?.shortDetail ?? '').toLowerCase();
+      if (clock || period) {
+        clocks[ev.id] = { clock, period, desc };
+      }
+    }
+    console.log(`ESPN live clocks: ${Object.keys(clocks).length} in-progress games`);
+    return clocks;
+  } catch (e) {
+    console.warn('ESPN live clock fetch failed:', e.message);
+    return {};
+  }
+}
+
+/**
+ * Format ESPN clock + period into a display string like "1st 14:32"
+ */
+function formatESPNLiveClock(clockData) {
+  if (!clockData) return 'LIVE';
+  const { clock, period, desc } = clockData;
+
+  if (desc && (desc.includes('half') || desc === 'ht')) return 'HALF';
+  if (desc && desc.includes('end of')) return desc.replace('end of', 'End of');
+
+  const periodLabel = period === 1 ? '1st' : period === 2 ? '2nd' : period >= 3 ? 'OT' : null;
+
+  if (periodLabel && clock && clock !== '0:00') return `${periodLabel} ${clock}`;
+  if (periodLabel) return periodLabel;
+  if (clock && clock !== '0:00') return clock;
+  return 'LIVE';
+}
+
 // ─── RapidAPI: Primary data source ───────────────────────────────────────────
 
 function mapRapidStatus(s) {
@@ -566,7 +616,7 @@ function lookupESPN(rapidGame, skeleton) {
  *
  * Then append any ESPN-only games (TBD future slots) not found in RapidAPI.
  */
-function mergeRapidWithESPN(rapidGames, skeleton) {
+function mergeRapidWithESPN(rapidGames, skeleton, liveClocks = {}) {
   // Track which ESPN entries were matched (to find unmatched TBD slots later)
   const matchedESPNIds = new Set();
   const enriched       = [];
@@ -580,8 +630,16 @@ function mergeRapidWithESPN(rapidGames, skeleton) {
       // RapidAPI is authoritative for live/completed state
       // ESPN fills in round, region, seeds, gameTime
       const gameTime = rg.gameTime ?? meta.gameTime;
+
+      // Use ESPN live clock if available (has real clock time like "14:32")
+      // Fall back to RapidAPI's half description if not
+      const espnClock = rg.inProgress ? liveClocks[meta.espnId] : null;
+      const liveLabel = espnClock
+        ? formatESPNLiveClock(espnClock)
+        : (rg.liveDetail ?? 'LIVE');
+
       const statusDetail = rg.inProgress
-        ? rg.liveDetail ?? 'LIVE'
+        ? liveLabel
         : rg.completed
           ? 'FINAL'
           : (gameTime ?? '');
@@ -687,16 +745,18 @@ export async function getLiveGames() {
 
   fetchPromise = (async () => {
     try {
-      // Fetch both in parallel — RapidAPI for current scores, ESPN for bracket structure
-      const [rapidGames, skeleton] = await Promise.all([
+      // Fetch all three in parallel:
+      // RapidAPI → scores/status, ESPN skeleton → bracket structure, ESPN live → clock
+      const [rapidGames, skeleton, liveClocks] = await Promise.all([
         fetchRapidGames().catch(e => {
           console.warn('RapidAPI fetch failed, using ESPN only:', e.message);
           return [];
         }),
         fetchESPNSkeleton(),
+        fetchESPNLiveClock(),
       ]);
 
-      const merged = mergeRapidWithESPN(rapidGames, skeleton);
+      const merged = mergeRapidWithESPN(rapidGames, skeleton, liveClocks);
 
       const completed  = merged.filter(g => g.completed).length;
       const inProgress = merged.filter(g => g.inProgress).length;
