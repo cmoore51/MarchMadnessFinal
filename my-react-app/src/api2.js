@@ -5,7 +5,7 @@ import { storage } from './storage';
 
 const BASE_URL = 'https://basketapi1.p.rapidapi.com/api/basketball';
 const RAPID_HEADERS = {
-  'X-RapidAPI-Key': import.meta.env.VITE_RAPID_API_KEY,
+  'X-RapidAPI-Key':  '3adde9dc24msh6844a469f4a57a7p11bd83jsn7885d9c9abb1',
   'X-RapidAPI-Host': 'basketapi1.p.rapidapi.com',
 };
 
@@ -23,6 +23,42 @@ const MAX_PARALLEL = 8;
 const SEED_ORDER = [1, 8, 5, 4, 6, 3, 7, 2];
 
 let fetchPromise = null;
+
+// ─── Persistent spread store ──────────────────────────────────────────────────
+// Spreads are stored separately and NEVER overwritten with null.
+// Once a spread is seen for a game it persists across all future fetches,
+// even after ESPN removes odds when a game goes live.
+
+const SPREAD_STORE_KEY = `espn_spreads_${YEAR}_v1`;
+let _spreadStore = null; // in-memory cache of { espnId: spread }
+
+async function loadSpreadStore() {
+  if (_spreadStore) return _spreadStore;
+  try {
+    const res = await storage.get(SPREAD_STORE_KEY);
+    _spreadStore = res?.value ? JSON.parse(res.value) : {};
+  } catch {
+    _spreadStore = {};
+  }
+  return _spreadStore;
+}
+
+async function saveSpread(espnId, spread) {
+  if (!espnId || spread == null) return;
+  const store = await loadSpreadStore();
+  if (store[espnId] === spread) return; // no change
+  store[espnId] = spread;
+  try {
+    await storage.set(SPREAD_STORE_KEY, JSON.stringify(store));
+  } catch (e) {
+    console.warn('Spread store save failed:', e.message);
+  }
+}
+
+async function getStoredSpread(espnId) {
+  const store = await loadSpreadStore();
+  return store[espnId] ?? null;
+}
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
@@ -74,30 +110,21 @@ function formatGameTime(timestampSec) {
  */
 function formatLiveClock(status) {
   if (!status) return 'LIVE';
-  const desc = (status.description ?? '').toLowerCase();
-  const period     = status.period ?? null;     // 1, 2, etc.
-  const clock      = status.clock ?? null;       // seconds remaining in period
-  const periodText = status.periodText ?? '';    // e.g. "1st Half", "2nd Half"
+  // RapidAPI only gives us description — no period number or clock time
+  // e.g. {"code":6,"description":"1st half","type":"inprogress"}
+  const desc = (status.description ?? '').toLowerCase().trim();
 
-  if (desc.includes('halftime') || desc.includes('half time')) return 'HALF';
+  if (desc.includes('halftime') || desc.includes('half time') || desc === 'ht') return 'HALF';
+  if (desc.includes('1st half')  || desc === '1h')    return '1st Half';
+  if (desc.includes('2nd half')  || desc === '2h')    return '2nd Half';
+  if (desc.includes('overtime')  || desc.includes('extra time') || desc === 'ot') return 'OT';
+  if (desc.includes('inprogress') || desc.includes('in progress')) return 'LIVE';
 
-  if (clock != null && period != null) {
-    const totalSec = Number(clock);
-    const m = Math.floor(totalSec / 60);
-    const s = String(Math.floor(totalSec % 60)).padStart(2, '0');
-    const clockStr = `${m}:${s}`;
-
-    if (period === 1 || periodText.toLowerCase().includes('1st')) return `H1 ${clockStr}`;
-    if (period === 2 || periodText.toLowerCase().includes('2nd')) return `H2 ${clockStr}`;
-    if (period >= 3) return `OT ${clockStr}`;
+  // Return the raw description capitalised if it's short and meaningful
+  if (desc.length > 0 && desc.length < 25) {
+    return status.description.replace(/\b\w/g, c => c.toUpperCase());
   }
-
-  // Fallback: use description snippet
-  if (desc.includes('1st') || desc.includes('first'))  return 'H1';
-  if (desc.includes('2nd') || desc.includes('second')) return 'H2';
-  if (desc.includes('overtime') || desc.includes(' ot')) return 'OT';
-
-  return status.description ?? 'LIVE';
+  return 'LIVE';
 }
 
 // ─── RapidAPI: Primary data source ───────────────────────────────────────────
@@ -229,7 +256,16 @@ async function fetchRapidGames() {
 
   console.log(`RapidAPI: ${rawGames.length} raw events`);
 
-  const shaped = rawGames.map(shapeRapidGame);
+  const shaped = rawGames.map(shapeRapidGame).filter(g => {
+    // Filter out First Four play-in games — they aren't in the main bracket
+    // First Four: same seed vs same seed (11v11, 16v16) or round 0
+    const homeSeed = g.home?.seed;
+    const awaySeed = g.away?.seed;
+    const isFirstFour = (homeSeed != null && awaySeed != null && homeSeed === awaySeed)
+      || g.round === 0;
+    if (isFirstFour) console.log(`Filtered First Four: ${g.away.name} vs ${g.home.name}`);
+    return !isFirstFour;
+  });
 
   if (shaped.length > 0) {
     try {
@@ -275,8 +311,11 @@ function parseESPNRegion(note = '') {
  * The map key is built from both team names so RapidAPI games can look up their metadata.
  */
 async function fetchESPNSkeleton() {
-  const ESPN_CACHE_KEY = `espn_skeleton_${YEAR}_v5`;
-  const ESPN_TS_KEY    = `espn_skeleton_ts_${YEAR}_v5`;
+  const ESPN_CACHE_KEY = `espn_skeleton_${YEAR}_v6`;
+  const ESPN_TS_KEY    = `espn_skeleton_ts_${YEAR}_v6`;
+
+  // Pre-load the spread store so getStoredSpread() calls below are fast
+  await loadSpreadStore();
 
   try {
     const [cached, ts] = await Promise.all([storage.get(ESPN_CACHE_KEY), storage.get(ESPN_TS_KEY)]);
@@ -363,7 +402,7 @@ async function fetchESPNSkeleton() {
       if (!isNaN(d)) gameTime = formatGameTime(Math.floor(d.getTime() / 1000));
     }
 
-    // Spread
+    // Spread — read from ESPN odds first, then fall back to our persistent store
     let spread = null;
     const odds = comp.odds?.[0];
     if (odds) {
@@ -372,6 +411,13 @@ async function fetchESPNSkeleton() {
         const m = String(sp).match(/([-+]?\d+(\.\d+)?)/);
         if (m) spread = parseFloat(m[1]);
       }
+    }
+    // Persist this spread (write-only, never null)
+    if (spread != null) {
+      saveSpread(ev.id, spread); // async, fire-and-forget
+    } else {
+      // ESPN dropped the odds — recover from our persistent store
+      spread = await getStoredSpread(ev.id);
     }
 
     const statusDetail = completed ? 'FINAL' : (gameTime ?? '');
@@ -432,47 +478,79 @@ function buildESPNKeys(homeName, homeAbbr, awayName, awayAbbr) {
 
 // ─── Team name matching ───────────────────────────────────────────────────────
 
-function teamsMatch(n1 = '', a1 = '', n2 = '', a2 = '') {
-  const rn = norm(n1), ra = norm(a1), en = norm(n2), ea = norm(a2);
-  if (!rn && !ra) return false;
-  if (!en && !ea) return false;
-  if (rn && en && rn === en) return true;
-  if (ra && ea && ra === ea) return true;
-  if (ra && en && en.includes(ra)) return true;
-  if (ea && rn && rn.includes(ea)) return true;
-  if (rn && en && (rn.includes(en) || en.includes(rn))) return true;
-  const rWords = rn.split(' ').filter(w => w.length > 2);
-  const eWords = en.split(' ').filter(w => w.length > 2);
-  if (rWords.length && eWords.length && rWords.some(w => eWords.includes(w))) return true;
+// Known RapidAPI → ESPN name corrections
+// RapidAPI often abbreviates or uses different school names than ESPN
+const NAME_ALIASES = {
+  'south methodist':    'smu',
+  'south. methodist':   'smu',
+  'miami ohio':         'miami oh',
+  'maryland baltimore': 'umbc',        // First Four — filtered anyway
+  'prairie view':       'prairie view', // First Four — filtered anyway
+  'lehigh mountain':    'lehigh',
+};
+
+function normAlias(s = '') {
+  const n = norm(s);
+  return NAME_ALIASES[n] ?? n;
+}
+
+// Build all name variants for a team including alias expansion
+function teamVariants(name = '', abbr = '') {
+  const raw  = norm(name);
+  const alias = normAlias(name);
+  const ab   = norm(abbr);
+  return [...new Set([raw, alias, ab].filter(Boolean))];
+}
+
+// Two teams match if any variant of one contains or equals any variant of the other,
+// using strict word-boundary logic to prevent "texas" matching "texas tech"
+function oneTeamMatches(variants1, variants2) {
+  for (const v1 of variants1) {
+    for (const v2 of variants2) {
+      if (!v1 || !v2) continue;
+      // Exact match
+      if (v1 === v2) return true;
+      // One fully contains the other AND they share enough characters (≥4)
+      // to avoid short false-positive matches like "miami" in "miami ohio"
+      if (v1.length >= 4 && v2.length >= 4) {
+        if (v1 === v2) return true;
+        // Require the shorter to be a whole-word match inside the longer
+        const shorter = v1.length <= v2.length ? v1 : v2;
+        const longer  = v1.length <= v2.length ? v2 : v1;
+        // Only match if shorter is at word boundary in longer
+        const escaped = shorter.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp('(^|\\s)' + escaped + '(\\s|$)');
+        if (re.test(longer)) return true;
+      }
+    }
+  }
   return false;
 }
 
 /**
- * Look up ESPN metadata for a RapidAPI game.
- * Tries direct key lookup first, then falls back to fuzzy scan.
+ * Look up ESPN metadata for a RapidAPI game using multi-tier matching.
  */
 function lookupESPN(rapidGame, skeleton) {
-  const hVariants = [...new Set([norm(rapidGame.home.name), norm(rapidGame.home.abbr)].filter(Boolean))];
-  const aVariants = [...new Set([norm(rapidGame.away.name), norm(rapidGame.away.abbr)].filter(Boolean))];
+  const hV = teamVariants(rapidGame.home.name, rapidGame.home.abbr);
+  const aV = teamVariants(rapidGame.away.name, rapidGame.away.abbr);
 
-  // Direct key lookup
-  for (const h of hVariants) {
-    for (const a of aVariants) {
+  // Tier 1: direct key lookup (fast, exact)
+  for (const h of hV) {
+    for (const a of aV) {
       if (skeleton[`${h}|||${a}`]) return skeleton[`${h}|||${a}`];
       if (skeleton[`${a}|||${h}`]) return skeleton[`${a}|||${h}`];
     }
   }
 
-  // Fuzzy scan fallback — check all pairs in skeleton
+  // Tier 2: fuzzy scan — for each skeleton pair, check if both teams match
   const pairKeys = Object.keys(skeleton).filter(k => k.includes('|||'));
   for (const k of pairKeys) {
     const [left, right] = k.split('|||');
-    const hOk = hVariants.some(h => h === left  || left.includes(h)  || h.includes(left));
-    const aOk = aVariants.some(a => a === right || right.includes(a) || a.includes(right));
-    if (hOk && aOk) return skeleton[k];
-    const hOk2 = hVariants.some(h => h === right || right.includes(h) || h.includes(right));
-    const aOk2 = aVariants.some(a => a === left  || left.includes(a)  || a.includes(left));
-    if (hOk2 && aOk2) return skeleton[k];
+    const lV = [left], rV = [right];
+    // Normal orientation
+    if (oneTeamMatches(hV, lV) && oneTeamMatches(aV, rV)) return skeleton[k];
+    // Swapped orientation (home/away can differ between APIs)
+    if (oneTeamMatches(hV, rV) && oneTeamMatches(aV, lV)) return skeleton[k];
   }
 
   return null;
@@ -536,7 +614,7 @@ function mergeRapidWithESPN(rapidGames, skeleton) {
       });
     } else {
       // No ESPN match — keep as-is (unknown round/region, filtered out later)
-      console.warn(`No ESPN match for RapidAPI game: ${rg.away.name} vs ${rg.home.name}`);
+      console.warn(`No ESPN match for: ${rg.away.name} vs ${rg.home.name}`);
       enriched.push(rg);
     }
   }
@@ -628,7 +706,7 @@ export async function getLiveGames() {
       return merged;
 
     } finally {
-      setTimeout(() => { fetchPromise = null; }, 30_000);
+      fetchPromise = null; // reset immediately so next poll always fetches fresh
     }
   })();
 
@@ -640,9 +718,11 @@ export async function getLiveGames() {
 export const clearAllCache = async () => {
   const keys = [
     `rapid_games_${YEAR}_v5`,   `rapid_ts_${YEAR}_v5`,
-    `espn_skeleton_${YEAR}_v5`, `espn_skeleton_ts_${YEAR}_v5`,
+    `espn_skeleton_${YEAR}_v6`, `espn_skeleton_ts_${YEAR}_v6`,
+    `espn_spreads_${YEAR}_v1`,
   ];
   await Promise.all(keys.map(k => storage.delete(k).catch(() => {})));
+  _spreadStore = null;
   console.log('All cache cleared');
   window.location.reload();
 };
@@ -658,8 +738,8 @@ export const clearGameCache = async () => {
 
 export const clearESPNMeta = async () => {
   await Promise.all([
-    storage.delete(`espn_skeleton_${YEAR}_v5`),
-    storage.delete(`espn_skeleton_ts_${YEAR}_v5`),
+    storage.delete(`espn_skeleton_${YEAR}_v6`),
+    storage.delete(`espn_skeleton_ts_${YEAR}_v6`),
   ]);
   console.log('ESPN skeleton cache cleared');
   window.location.reload();
