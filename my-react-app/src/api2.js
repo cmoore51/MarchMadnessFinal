@@ -5,7 +5,7 @@ import { storage } from './storage';
 
 const BASE_URL = 'https://basketapi1.p.rapidapi.com/api/basketball';
 const RAPID_HEADERS = {
-  'X-RapidAPI-Key':  '3adde9dc24msh6844a469f4a57a7p11bd83jsn7885d9c9abb1',
+  'X-RapidAPI-Key':  import.meta.env.VITE_RAPID_API_KEY,
   'X-RapidAPI-Host': 'basketapi1.p.rapidapi.com',
 };
 

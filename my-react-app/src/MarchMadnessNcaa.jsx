@@ -5,10 +5,49 @@ import { makeDemoGames } from './demoData';
 import { storage } from './storage';
 import './index.css';
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-function didCover(winScore, loseScore, spread) {
+// ── Cover / steal logic ───────────────────────────────────────────────────────
+//
+// Spread convention (matches ESPN): negative = home team favored.
+//   spread = -7  → home favored by 7
+//   spread = +5  → away favored by 5
+//   spread = 0   → pick'em
+//
+// Rules:
+//   • Favorite wins AND margin > |spread|  → covered (true)  → winner's owner keeps team
+//   • Favorite wins BUT margin ≤ |spread|  → no cover (false) → LOSER's owner steals winner
+//   • Underdog wins outright               → auto cover (true) → winner's owner keeps team
+//   • No spread set                        → null (no steal possible)
+//   • Pick'em (spread = 0)                 → treat as covered, no steal
+//
+// Parameters: the full game object (needs .home, .away, .spread) plus any
+// admin-overridden spread value.
+
+function calcCover(game, spreadOverride) {
+  const spread = spreadOverride ?? game.spread;
   if (spread == null) return null;
-  return spread < 0 ? (winScore - loseScore) > Math.abs(spread) : true;
+
+  const home = game.home;
+  const away = game.away;
+  const winner = away.winner ? away : home.winner ? home : null;
+  const loser  = winner === away ? home : winner === home ? away : null;
+  if (!winner || !loser) return null; // game not final
+
+  // Pick'em — no steal
+  if (spread === 0) return true;
+
+  // Who is the favorite?
+  // spread < 0 → home favored; spread > 0 → away favored
+  const favorite  = spread < 0 ? home : away;
+  const favWon    = winner === favorite;
+  const margin    = (winner.score ?? 0) - (loser.score ?? 0);
+
+  if (!favWon) {
+    // Underdog won outright → automatic cover, no steal
+    return true;
+  }
+
+  // Favorite won — did they cover?
+  return margin > Math.abs(spread);
 }
 
 function getColor(players, p) {
@@ -405,9 +444,16 @@ function SpreadPopupBody({ game, fixed, spreads, spreadInput, setSpreadInput,
   const spread     = spreads[game.id] ?? game.spread;
   const winner     = game.away.winner ? game.away : game.home.winner ? game.home : null;
   const loser      = winner ? (winner === game.away ? game.home : game.away) : null;
-  const covered    = winner && loser && spread != null ? didCover(winner.score, loser.score, spread) : null;
+  const covered    = winner && loser ? calcCover(game, spreads[game.id]) : null;
+
+  // Determine if this was an upset (underdog won) for messaging
+  const favorite   = spread != null && spread !== 0 ? (spread < 0 ? game.home : game.away) : null;
+  const isUpset    = winner && favorite && winner.id !== favorite.id;
+
   const lOwner     = loser ? ownerAtRound(loser.id, game.round) : null;
-  const captureMsg = covered === false && lOwner ? `⚡ ${lOwner} captures ${winner?.name}!` : null;
+  // Steal only happens when favorite won but didn't cover — not on upsets
+  const captureMsg = covered === false && !isUpset && lOwner
+    ? `⚡ ${lOwner} captures ${winner?.name}!` : null;
   const hasScores  = game.away.score != null || game.home.score != null;
   return (
     <div className={fixed ? 'bracket-popup-overlay' : 'spread-popup'} onClick={e => e.stopPropagation()}>
@@ -422,11 +468,11 @@ function SpreadPopupBody({ game, fixed, spreads, spreadInput, setSpreadInput,
       {spread != null && (
         <div className="spread-popup__info">
           Spread: <strong>{spread > 0 ? `+${spread}` : spread}</strong>
-          {covered != null && (
-            <span style={{ marginLeft: 8, color: covered ? '#22c55e' : '#ef4444' }}>
-              {covered ? '✓ Covered' : '✗ Not covered'}
-            </span>
+          {isUpset && winner && (
+            <span style={{ marginLeft: 8, color: '#f59e0b' }}>🏆 Upset — auto cover</span>
           )}
+          {!isUpset && covered === true  && <span style={{ marginLeft: 8, color: '#22c55e' }}>✓ Covered</span>}
+          {!isUpset && covered === false && <span style={{ marginLeft: 8, color: '#ef4444' }}>✗ Not covered</span>}
         </div>
       )}
       {captureMsg && <div className="spread-popup__capture">{captureMsg}</div>}
@@ -460,11 +506,16 @@ function GameCard({ game, spreads, focusGame, openCard, closeCard, spreadInput, 
   const spread    = isTBD ? null : (spreads[game.id] ?? game.spread);
   const winner    = isTBD ? null : (game.away.winner ? game.away : game.home.winner ? game.home : null);
   const loser     = winner ? (winner === game.away ? game.home : game.away) : null;
-  const covered   = winner && loser && spread != null ? didCover(winner.score, loser.score, spread) : null;
+  const covered   = winner && loser ? calcCover(game, spreads[game.id]) : null;
+  const favorite  = spread != null && spread !== 0 ? (spread < 0 ? game.home : game.away) : null;
+  const isUpset   = winner && favorite && winner.id !== favorite.id;
   const hasScores = !isTBD && (game.away.score != null || game.home.score != null);
   const isFocused = focusGame === game.id;
-  const spreadClass = covered === true ? 'game-card__spread--covered'
-    : covered === false ? 'game-card__spread--uncovered' : 'game-card__spread--neutral';
+  const spreadClass = isUpset
+    ? 'game-card__spread--upset'
+    : covered === true  ? 'game-card__spread--covered'
+    : covered === false ? 'game-card__spread--uncovered'
+    : 'game-card__spread--neutral';
   const slotProps = { players, assignments, ownerAtRound, getOwner: getOwnerFn,
                       assignTeam, isAdmin, tab, selectedPlayer };
   return (
@@ -480,7 +531,10 @@ function GameCard({ game, spreads, focusGame, openCard, closeCard, spreadInput, 
             {isTBD ? 'TBD' : game.inProgress ? `● ${game.statusDetail || 'LIVE'}` : game.completed ? 'FINAL' : (game.gameTime ?? game.statusDetail ?? 'SCHED')}
           </span>
           {!isTBD && (spread != null
-            ? <span className={`game-card__spread ${spreadClass}`}>{spread > 0 ? `+${spread}` : spread}{covered === true ? ' ✓' : covered === false ? ' ✗' : ''}</span>
+            ? <span className={`game-card__spread ${spreadClass}`}>
+                {spread > 0 ? `+${spread}` : spread}
+                {isUpset ? ' 🏆' : covered === true ? ' ✓' : covered === false ? ' ✗' : ''}
+              </span>
             : <span className="game-card__spread-add">+ spread</span>
           )}
         </div>
@@ -522,8 +576,14 @@ function MiniCard({ game, spreads, focusGame, openCard, closeCard, players, assi
   const spread    = isTBD ? null : (spreads[game.id] ?? game.spread);
   const winner    = isTBD ? null : (game.away.winner ? game.away : game.home.winner ? game.home : null);
   const loser     = winner ? (winner === game.away ? game.home : game.away) : null;
-  const covered   = winner && loser && spread != null ? didCover(winner.score, loser.score, spread) : null;
-  const sc        = covered === true ? 'mini-card__spread--covered' : covered === false ? 'mini-card__spread--uncovered' : 'mini-card__spread--neutral';
+  const covered   = winner && loser ? calcCover(game, spreads[game.id]) : null;
+  const favorite  = spread != null && spread !== 0 ? (spread < 0 ? game.home : game.away) : null;
+  const isUpset   = winner && favorite && winner.id !== favorite.id;
+  const sc        = isUpset
+    ? 'mini-card__spread--upset'
+    : covered === true  ? 'mini-card__spread--covered'
+    : covered === false ? 'mini-card__spread--uncovered'
+    : 'mini-card__spread--neutral';
   const isFocused = focusGame === game.id;
   const slotProps = { players, assignments, ownerAtRound, getOwnerFn };
   return (
@@ -538,7 +598,10 @@ function MiniCard({ game, spreads, focusGame, openCard, closeCard, players, assi
           {isTBD ? 'TBD' : game.inProgress ? `● ${game.statusDetail || 'LIVE'}` : game.completed ? 'FINAL' : (game.gameTime ?? game.statusDetail ?? 'SCHED')}
         </span>
         {!isTBD && (spread != null
-          ? <span className={`mini-card__spread ${sc}`}>{spread > 0 ? `+${spread}` : spread}{covered === true ? ' ✓' : covered === false ? ' ✗' : ''}</span>
+          ? <span className={`mini-card__spread ${sc}`}>
+              {spread > 0 ? `+${spread}` : spread}
+              {isUpset ? ' 🏆' : covered === true ? ' ✓' : covered === false ? ' ✗' : ''}
+            </span>
           : <span className="mini-card__spread mini-card__spread--neutral">+ sprd</span>
         )}
       </div>
@@ -716,7 +779,7 @@ export default function App() {
       if (!winner || !loser) return;
       const wOwner = own[winner.id]?.owner, lOwner = own[loser.id]?.owner;
       if (!wOwner && !lOwner) return;
-      const covered = didCover(winner.score, loser.score, spreads[g.id] ?? g.spread);
+      const covered = calcCover(g, spreads[g.id]);
       if (covered === false && lOwner) own[winner.id] = { owner: lOwner, capturedFrom: wOwner || null };
       else if (wOwner) own[winner.id] = { owner: wOwner, capturedFrom: own[winner.id]?.capturedFrom ?? null };
     });
@@ -747,7 +810,7 @@ export default function App() {
       const loser   = winner ? (winner === g.away ? g.home : g.away) : null;
       if (!winner || !loser) return;
       const wOwner  = live[winner.id], lOwner = live[loser.id];
-      const covered = didCover(winner.score, loser.score, spreads[g.id] ?? g.spread);
+      const covered = calcCover(g, spreads[g.id]);
       if (covered === false && lOwner) {
         if (wOwner && counts[wOwner] !== undefined) {
           counts[wOwner]--;
@@ -778,7 +841,7 @@ export default function App() {
       const winner  = g.away.winner ? g.away : g.home.winner ? g.home : null;
       const loser   = winner ? (winner === g.away ? g.home : g.away) : null;
       if (!winner || !loser) return;
-      const covered = didCover(winner.score, loser.score, spreads[g.id] ?? g.spread);
+      const covered = calcCover(g, spreads[g.id]);
       if (covered === false && live[loser.id]) live[winner.id] = live[loser.id];
       delete live[loser.id];
     });
