@@ -85,6 +85,24 @@ const ROUND1_SEEDS = [
   [1,16],[8,9],[5,12],[4,13],[6,11],[3,14],[7,10],[2,15],
 ];
 
+// ── Name normalization — used everywhere IDs might mismatch ──────────────────
+function normName(n = '') {
+  return n.toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function nameVariants(name = '') {
+  const n = normName(name);
+  const variants = new Set([n]);
+  variants.add(n.replace(/\bstate\b/g, 'st'));
+  variants.add(n.replace(/\bst\b/g, 'state'));
+  variants.add(n.replace(/\bsaint\b/g, 'st'));
+  variants.add(n.replace(/\bst\b/g, 'saint'));
+  const words = n.split(' ');
+  if (words.length > 2) variants.add(words.slice(0, 2).join(' '));
+  if (words.length > 1) variants.add(words[0]);
+  return [...variants].filter(v => v.length >= 3);
+}
+
 // Pre-compute which seeds can appear in each slot at each round.
 // slotSeedPools[round][slot] = Set of seeds that could appear in that slot.
 const SLOT_SEED_POOLS = (() => {
@@ -395,12 +413,15 @@ function PlayerRow({ p, i, isSelected, onSelect, onEdit, onClear, onRemove }) {
 }
 
 function TeamSlot({ team, isWinner, isLoser, showScore, round, players, assignments,
-                    ownerAtRound, getOwner, assignTeam, isAdmin, tab, selectedPlayer }) {
+                    ownerAtRound, getOwner, assignTeam, isAdmin, tab, selectedPlayer, ownership }) {
   if (!team) return null;
   const isTBD     = !team.id || team.name === 'TBD';
   const owner     = isTBD ? null : (round ? ownerAtRound(team.id, round, team.name) : getOwner(team.id));
   const color     = owner ? getColor(players, owner) : '#1e2d42';
-  const captured  = !isTBD && round && owner && assignments[team.id] && owner !== assignments[team.id];
+  const originalOwner = assignments[team.id] ?? ownerAtRound(team.id, 1, team.name);
+  const ownershipEntry = ownership?.[team.id]
+    ?? (team.name ? nameVariants(team.name).map(v => ownership?.[`name:${v}`]).find(Boolean) : null);
+  const captured  = !isTBD && !!ownershipEntry?.capturedFrom && owner && originalOwner && owner !== originalOwner;
   const canAssign = isAdmin && tab === 'setup' && selectedPlayer && !isTBD;
   return (
     <div
@@ -504,7 +525,7 @@ function SpreadPopupBody({ game, fixed, spreads, spreadInput, setSpreadInput,
 
 function GameCard({ game, spreads, focusGame, openCard, closeCard, spreadInput, setSpreadInput,
                     saveSpread, clearSpread, players, assignments, ownerAtRound, getOwnerFn,
-                    isAdmin, tab, selectedPlayer, assignTeam }) {
+                    isAdmin, tab, selectedPlayer, assignTeam, ownership }) {
   const isTBD     = game._isTBD;
   const spread    = isTBD ? null : (spreads[game.id] ?? game.spread);
   const winner    = isTBD ? null : (game.away.winner ? game.away : game.home.winner ? game.home : null);
@@ -520,7 +541,7 @@ function GameCard({ game, spreads, focusGame, openCard, closeCard, spreadInput, 
     : covered === false ? 'game-card__spread--uncovered'
     : 'game-card__spread--neutral';
   const slotProps = { players, assignments, ownerAtRound, getOwner: getOwnerFn,
-                      assignTeam, isAdmin, tab, selectedPlayer };
+                      assignTeam, isAdmin, tab, selectedPlayer, ownership };
   return (
     <div
       className={['game-card', game.inProgress && 'game-card--live', isTBD && 'game-card--tbd'].filter(Boolean).join(' ')}
@@ -551,12 +572,15 @@ function GameCard({ game, spreads, focusGame, openCard, closeCard, spreadInput, 
   );
 }
 
-function MiniSlot({ team, isWinner, isLoser, round, players, assignments, ownerAtRound, getOwnerFn }) {
+function MiniSlot({ team, isWinner, isLoser, round, players, assignments, ownerAtRound, getOwnerFn, ownership }) {
   if (!team) return null;
   const isTBD    = !team.id || team.name === 'TBD';
   const owner    = isTBD ? null : (round ? ownerAtRound(team.id, round, team.name) : getOwnerFn(team.id));
   const color    = owner ? getColor(players, owner) : '#0d1b2a';
-  const captured = !isTBD && round && owner && assignments[team.id] && owner !== assignments[team.id];
+  const originalOwner = assignments[team.id] ?? ownerAtRound(team.id, 1, team.name);
+  const ownershipEntry = ownership?.[team.id]
+    ?? (team.name ? nameVariants(team.name).map(v => ownership?.[`name:${v}`]).find(Boolean) : null);
+  const captured = !isTBD && !!ownershipEntry?.capturedFrom && owner && originalOwner && owner !== originalOwner;
   return (
     <div className={['mini-slot', isWinner && 'mini-slot--winner', isLoser && 'mini-slot--loser', isTBD && 'mini-slot--tbd'].filter(Boolean).join(' ')}
       style={{ borderLeft: `3px solid ${isTBD ? '#1e2d3e' : color}` }}>
@@ -573,7 +597,7 @@ function MiniSlot({ team, isWinner, isLoser, round, players, assignments, ownerA
   );
 }
 
-function MiniCard({ game, spreads, focusGame, openCard, closeCard, players, assignments, ownerAtRound, getOwnerFn }) {
+function MiniCard({ game, spreads, focusGame, openCard, closeCard, players, assignments, ownerAtRound, getOwnerFn, ownership }) {
   if (!game) return <div className="mini-card--placeholder" />;
   const isTBD     = game._isTBD;
   const spread    = isTBD ? null : (spreads[game.id] ?? game.spread);
@@ -588,7 +612,7 @@ function MiniCard({ game, spreads, focusGame, openCard, closeCard, players, assi
     : covered === false ? 'mini-card__spread--uncovered'
     : 'mini-card__spread--neutral';
   const isFocused = focusGame === game.id;
-  const slotProps = { players, assignments, ownerAtRound, getOwnerFn };
+  const slotProps = { players, assignments, ownerAtRound, getOwnerFn, ownership };
   return (
     <div
       className={['mini-card', game.inProgress && 'mini-card--live', isTBD && 'mini-card--tbd'].filter(Boolean).join(' ')}
@@ -613,10 +637,10 @@ function MiniCard({ game, spreads, focusGame, openCard, closeCard, players, assi
 }
 
 function BracketColumn({ games, region, round, fp, players, assignments, spreads,
-                         focusGame, openCard, closeCard, ownerAtRound, getOwnerFn }) {
+                         focusGame, openCard, closeCard, ownerAtRound, getOwnerFn, ownership }) {
   const rGames    = games.filter(g => g.region === region && g.round === round);
   const groupSize = Math.pow(2, round - 1);
-  const cardProps = { spreads, focusGame, openCard, closeCard, players, assignments, ownerAtRound, getOwnerFn };
+  const cardProps = { spreads, focusGame, openCard, closeCard, players, assignments, ownerAtRound, getOwnerFn, ownership };
   return (
     <div className="bracket-col">
       {rGames.map((g, i) => {
@@ -637,10 +661,10 @@ function BracketColumn({ games, region, round, fp, players, assignments, spreads
 }
 
 function RegionStrip({ games, region, dir, fp, players, assignments, spreads,
-                       focusGame, openCard, closeCard, ownerAtRound, getOwnerFn }) {
+                       focusGame, openCard, closeCard, ownerAtRound, getOwnerFn, ownership }) {
   const rounds        = [1, 2, 3, 4];
   const orderedRounds = dir === 'ltr' ? rounds : [...rounds].reverse();
-  const colProps      = { games, region, fp, players, assignments, spreads, focusGame, openCard, closeCard, ownerAtRound, getOwnerFn };
+  const colProps      = { games, region, fp, players, assignments, spreads, focusGame, openCard, closeCard, ownerAtRound, getOwnerFn, ownership };
   return (
     <div className="region-strip">
       <div className={`region-strip__title${dir === 'rtl' ? ' region-strip__title--right' : ''}`}
@@ -808,25 +832,7 @@ export default function App() {
     };
   }, []);
 
-  // Normalize a team name for fuzzy matching:
-  // strips punctuation, lowercases, collapses spaces
-  function normName(n = '') {
-    return n.toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
-  }
-
-  // Build all name variants for a team to maximize match chances
-  function nameVariants(name = '') {
-    const n = normName(name);
-    const variants = new Set([n]);
-    // "michigan state" → also try "michigan st"
-    variants.add(n.replace(/\bstate\b/, 'st'));
-    // "michigan st" → also try "michigan state"
-    variants.add(n.replace(/\bst\b/, 'state'));
-    // first two words only (handles "Florida Atlantic Owls" → "florida atlantic")
-    const words = n.split(' ');
-    if (words.length > 2) variants.add(words.slice(0, 2).join(' '));
-    return [...variants].filter(Boolean);
-  }
+  // ── Name normalization (also used by TeamSlot/MiniSlot for capture display) ──
   const { ownership, ownershipAtRound, nameToOwnerAtRound } = (() => {
     const live = {};
     Object.entries(assignments).forEach(([tid, p]) => { live[tid] = p; });
@@ -882,6 +888,10 @@ export default function App() {
         if (covered === false && lOwner) {
           live[winner.id] = lOwner;
           own[winner.id]  = { owner: lOwner, capturedFrom: wOwner ?? null };
+          // Also index by name so placeholder slots can find it
+          nameVariants(winner.name).forEach(v => {
+            own[`name:${v}`] = { owner: lOwner, capturedFrom: wOwner ?? null };
+          });
         } else if (wOwner) {
           live[winner.id] = wOwner;
           own[winner.id]  = { owner: wOwner, capturedFrom: own[winner.id]?.capturedFrom ?? null };
@@ -1060,9 +1070,9 @@ export default function App() {
   const displayRegions = activeRegion === 'All' ? BRACKET_REGIONS : [activeRegion];
 
   const standingsProps = { players, scores, eliminationInfo, getColorFn };
-  const cardProps  = { spreads, focusGame, openCard, closeCard, spreadInput, setSpreadInput, saveSpread, clearSpread, players, assignments, ownerAtRound, getOwnerFn, isAdmin };
-  const miniProps  = { spreads, focusGame, openCard, closeCard, players, assignments, ownerAtRound, getOwnerFn };
-  const stripProps = { games: bracketGames, fp: filterPlayer, players, assignments, spreads, focusGame, openCard, closeCard, ownerAtRound, getOwnerFn };
+  const cardProps  = { spreads, focusGame, openCard, closeCard, spreadInput, setSpreadInput, saveSpread, clearSpread, players, assignments, ownerAtRound, getOwnerFn, isAdmin, ownership };
+  const miniProps  = { spreads, focusGame, openCard, closeCard, players, assignments, ownerAtRound, getOwnerFn, ownership };
+  const stripProps = { games: bracketGames, fp: filterPlayer, players, assignments, spreads, focusGame, openCard, closeCard, ownerAtRound, getOwnerFn, ownership };
 
   return (
     <div className="app" style={{ paddingTop: headerHeight }} onClick={() => { if (focusGame) closeCard(); }}>
