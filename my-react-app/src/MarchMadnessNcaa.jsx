@@ -22,13 +22,97 @@ const SK_SPREADS     = 'bracket_spreads';
 
 const BRACKET_REGIONS = ['South', 'East', 'West', 'Midwest'];
 const GAMES_PER_ROUND = { 1: 8, 2: 4, 3: 2, 4: 1 };
-const ROUND1_SEEDS    = [
+
+// ── Bracket slot seed pools ───────────────────────────────────────────────────
+//
+// NCAA bracket structure (per region, 8 games in round 1):
+//
+//  Slot 0: (1) vs (16)  ─┐
+//  Slot 1: (8) vs  (9)  ─┤─ next-round slot 0
+//  Slot 2: (5) vs (12)  ─┐
+//  Slot 3: (4) vs (13)  ─┤─ next-round slot 1
+//  Slot 4: (6) vs (11)  ─┐
+//  Slot 5: (3) vs (14)  ─┤─ next-round slot 2
+//  Slot 6: (7) vs (10)  ─┐
+//  Slot 7: (2) vs (15)  ─┤─ next-round slot 3
+//
+// next_round_slot = floor(current_slot / 2)
+// even slot → "away" team, odd slot → "home" team in the next round
+
+const ROUND1_SEEDS = [
   [1,16],[8,9],[5,12],[4,13],[6,11],[3,14],[7,10],[2,15],
 ];
+
+// Pre-compute which seeds can appear in each slot at each round.
+// slotSeedPools[round][slot] = Set of seeds that could appear in that slot.
+const SLOT_SEED_POOLS = (() => {
+  const pools = {
+    1: ROUND1_SEEDS.map(pair => new Set(pair)),
+  };
+  for (let round = 2; round <= 4; round++) {
+    const prev     = pools[round - 1];
+    const numSlots = prev.length / 2;
+    pools[round]   = [];
+    for (let slot = 0; slot < numSlots; slot++) {
+      pools[round].push(new Set([...prev[slot * 2], ...prev[slot * 2 + 1]]));
+    }
+  }
+  return pools;
+})();
+
+// Given a game and its round, find which bracket slot (0-based) it belongs to.
+// For round 1: single seed is enough (each pool has only 2 seeds, fully unambiguous).
+// For round 2+: require both seeds to avoid cross-pool ambiguity from upsets.
+function findSlotBySeeds(game, round) {
+  const pools = SLOT_SEED_POOLS[round];
+  if (!pools) return -1;
+  const s1 = game.away?.seed;
+  const s2 = game.home?.seed;
+
+  if (round === 1) {
+    // R1 pools each have exactly 2 seeds — either seed uniquely identifies the slot
+    for (let i = 0; i < pools.length; i++) {
+      if ((s1 != null && pools[i].has(s1)) || (s2 != null && pools[i].has(s2))) return i;
+    }
+  } else {
+    // R2+ require both seeds to avoid ambiguity
+    if (s1 == null || s2 == null) return -1;
+    for (let i = 0; i < pools.length; i++) {
+      if (pools[i].has(s1) && pools[i].has(s2)) return i;
+    }
+  }
+  return -1;
+}
+
+// For round 2+, find a game's slot by tracing which R1 game its teams came from.
+// slotMapPrevRound = slotMap[region][round-1], indexed by bracket slot.
+// A team appearing in R1 slot N means its winner goes to R2 slot floor(N/2).
+function findSlotByTeamIds(game, slotMapPrevRound) {
+  if (!slotMapPrevRound) return -1;
+  const teamIds = new Set([game.away?.id, game.home?.id].filter(Boolean));
+  if (teamIds.size === 0) return -1;
+
+  for (let r1slot = 0; r1slot < slotMapPrevRound.length; r1slot++) {
+    const prev = slotMapPrevRound[r1slot];
+    if (!prev) continue;
+    const prevIds = [prev.away?.id, prev.home?.id].filter(Boolean);
+    if (prevIds.some(id => teamIds.has(id))) {
+      return Math.floor(r1slot / 2);
+    }
+  }
+  return -1;
+}
 
 function makeTBD(seed = null) {
   return { id: null, name: 'TBD', abbr: 'TBD', seed, score: null, winner: false };
 }
+
+// ── buildFullBracket ──────────────────────────────────────────────────────────
+//
+// Assigns each real API game to its correct bracket slot using seed-pool lookup,
+// then fills any remaining slots with placeholders. Placeholder slots for rounds
+// 2-4 are populated with actual winners from completed feeder games, so the
+// advancing team appears in the correct adjacent slot rather than the first open one.
 
 function buildFullBracket(apiGames) {
   const real = apiGames.map(g => ({
@@ -39,44 +123,170 @@ function buildFullBracket(apiGames) {
 
   const result = [];
 
+  // slotMap[region][round] = array of length GAMES_PER_ROUND[round],
+  // where slotMap[region][round][slot] is the game object at that bracket position.
+  // This is the source of truth for feeder lookups — always positionally correct.
+  const slotMap = {};
+  BRACKET_REGIONS.forEach(r => { slotMap[r] = {}; });
+
   BRACKET_REGIONS.forEach(region => {
     for (let round = 1; round <= 4; round++) {
-      const need  = GAMES_PER_ROUND[round];
-      const found = real.filter(g => g.region === region && g.round === round);
-      for (let slot = 0; slot < need; slot++) {
-        if (found[slot]) {
-          result.push(found[slot]);
+      const need     = GAMES_PER_ROUND[round];
+      const regional = real.filter(g => g.region === region && g.round === round);
+
+      // Step 1: assign real API games to their correct bracket slots
+      const slotted = new Array(need).fill(null);
+
+      for (const g of regional) {
+        // Try seed-based lookup first (works when both seeds are known)
+        let slot = findSlotBySeeds(g, round);
+
+        // For round 2+, fall back to tracing team IDs through previous round
+        if (slot === -1 && round > 1) {
+          slot = findSlotByTeamIds(g, slotMap[region][round - 1]);
+        }
+
+        if (slot >= 0 && slot < need && slotted[slot] === null) {
+          slotted[slot] = g;
+        } else if (slot >= 0 && slot < need && slotted[slot] !== null) {
+          // Slot already occupied — skip duplicate, don't fall back to first empty
+          console.warn(`Bracket: duplicate game for ${region} R${round} slot ${slot}:`, g.away?.name, 'vs', g.home?.name);
         } else {
-          const [as, hs] = round === 1 && slot < ROUND1_SEEDS.length
-            ? ROUND1_SEEDS[slot] : [null, null];
-          result.push({
-            id: `placeholder-${region}-r${round}-s${slot}`, source: 'placeholder',
-            region, round, roundLabel: ROUND_LABELS[round] ?? `Round ${round}`,
-            completed: false, inProgress: false, statusDetail: '', spread: null,
-            home: makeTBD(hs), away: makeTBD(as), _isTBD: true, _placeholder: true,
-          });
+          // Could not determine slot — log and skip (don't corrupt bracket)
+          console.warn(`Bracket: could not place ${region} R${round} game:`, g.away?.name, 'vs', g.home?.name, '| seeds:', g.away?.seed, g.home?.seed, '| ids:', g.away?.id, g.home?.id);
         }
       }
+
+      // Step 2: fill empty slots with placeholders.
+      // For round > 1, look up winners from slotMap (positionally reliable).
+      for (let slot = 0; slot < need; slot++) {
+        if (slotted[slot]) continue; // real game already placed
+
+        let awayTeam, homeTeam;
+
+        if (round === 1) {
+          const [as, hs] = ROUND1_SEEDS[slot];
+          awayTeam = makeTBD(as);
+          homeTeam = makeTBD(hs);
+        } else {
+          // Feeder slots in the previous round: slot*2 → away, slot*2+1 → home
+          const prevSlots = slotMap[region][round - 1];
+          const gameA     = prevSlots?.[slot * 2];
+          const gameB     = prevSlots?.[slot * 2 + 1];
+
+          const winnerOf = (g) => {
+            if (!g || !g.completed) return null;
+            // Don't use a winner if their next-round game is already a real API game
+            // (it would already be in slotted[] and this placeholder branch won't run,
+            // but guard anyway)
+            const w = g.away?.winner ? g.away : g.home?.winner ? g.home : null;
+            return w?.id ? { ...w, score: null, winner: false } : null;
+          };
+
+          awayTeam = winnerOf(gameA) ?? makeTBD();
+          homeTeam = winnerOf(gameB) ?? makeTBD();
+        }
+
+        slotted[slot] = {
+          id: `placeholder-${region}-r${round}-s${slot}`,
+          source: 'placeholder',
+          region,
+          round,
+          roundLabel: ROUND_LABELS[round] ?? `Round ${round}`,
+          completed: false,
+          inProgress: false,
+          statusDetail: '',
+          spread: null,
+          home: homeTeam,
+          away: awayTeam,
+          _isTBD: !awayTeam.id && !homeTeam.id,
+          _placeholder: true,
+        };
+      }
+
+      // Step 3: save the fully-slotted array for feeder lookups in the next round,
+      // then push games into result in slot order.
+      slotMap[region][round] = slotted;
+      slotted.forEach(g => result.push(g));
     }
   });
 
+  // ── Final Four (round 5) ──────────────────────────────────────────────────
   const ffGames = real.filter(g => g.round === 5);
+
+  // Pull Elite Eight winners for placeholder FF slots
+  const eliteEight = {};
+  BRACKET_REGIONS.forEach(region => {
+    const r4 = result.filter(g => g.region === region && g.round === 4);
+    // There's exactly 1 game per region in round 4 (slot 0)
+    if (r4[0]?.completed) {
+      const w = r4[0].away?.winner ? r4[0].away : r4[0].home?.winner ? r4[0].home : null;
+      if (w) eliteEight[region] = { ...w, score: null, winner: false };
+    }
+  });
+
+  // FF slot 0: East vs West, FF slot 1: South vs Midwest (2026 bracket convention)
+  const ffSlots = [
+    { awayRegion: 'East',  homeRegion: 'West'    },
+    { awayRegion: 'South', homeRegion: 'Midwest'  },
+  ];
+
   for (let slot = 0; slot < 2; slot++) {
-    result.push(ffGames[slot] ?? {
-      id: `placeholder-ff-s${slot}`, source: 'placeholder',
-      region: 'Final Four', round: 5, roundLabel: 'Final Four',
-      completed: false, inProgress: false, statusDetail: '', spread: null,
-      home: makeTBD(), away: makeTBD(), _isTBD: true, _placeholder: true,
-    });
+    if (ffGames[slot]) {
+      result.push(ffGames[slot]);
+    } else {
+      const { awayRegion, homeRegion } = ffSlots[slot];
+      const awayTeam = eliteEight[awayRegion] ?? makeTBD();
+      const homeTeam = eliteEight[homeRegion] ?? makeTBD();
+      result.push({
+        id: `placeholder-ff-s${slot}`,
+        source: 'placeholder',
+        region: 'Final Four',
+        round: 5,
+        roundLabel: 'Final Four',
+        completed: false,
+        inProgress: false,
+        statusDetail: '',
+        spread: null,
+        home: homeTeam,
+        away: awayTeam,
+        _isTBD: !awayTeam.id && !homeTeam.id,
+        _placeholder: true,
+      });
+    }
   }
 
+  // ── Championship (round 6) ────────────────────────────────────────────────
   const champGame = real.find(g => g.round === 6);
-  result.push(champGame ?? {
-    id: 'placeholder-champ', source: 'placeholder',
-    region: 'Championship', round: 6, roundLabel: 'Championship',
-    completed: false, inProgress: false, statusDetail: '', spread: null,
-    home: makeTBD(), away: makeTBD(), _isTBD: true, _placeholder: true,
-  });
+  if (champGame) {
+    result.push(champGame);
+  } else {
+    const allFF   = result.filter(g => g.round === 5);
+    const ff0     = allFF[0];
+    const ff1     = allFF[1];
+    const winnerOf = (g) => {
+      if (!g?.completed) return null;
+      const w = g.away?.winner ? g.away : g.home?.winner ? g.home : null;
+      return w ? { ...w, score: null, winner: false } : null;
+    };
+    const champAway = winnerOf(ff0);
+    const champHome = winnerOf(ff1);
+    result.push({
+      id: 'placeholder-champ',
+      source: 'placeholder',
+      region: 'Championship',
+      round: 6,
+      roundLabel: 'Championship',
+      completed: false,
+      inProgress: false,
+      statusDetail: '',
+      spread: null,
+      home: champHome ?? makeTBD(),
+      away: champAway ?? makeTBD(),
+      _isTBD: !champAway && !champHome,
+      _placeholder: true,
+    });
+  }
 
   return result;
 }
@@ -93,7 +303,6 @@ const PlayerInput = memo(({ value, onChange, onAdd }) => (
   </div>
 ));
 
-// ── PlayerRow: with inline edit, clear, remove ───────────────────────────────
 function PlayerRow({ p, i, isSelected, onSelect, onEdit, onClear, onRemove }) {
   const [editing, setEditing]   = useState(false);
   const [editVal, setEditVal]   = useState(p);
@@ -132,21 +341,12 @@ function PlayerRow({ p, i, isSelected, onSelect, onEdit, onClear, onRemove }) {
       <span className="player-row__dot" style={{ background: color }} />
       <span className="player-row__name">{p}</span>
       <div className="player-row__actions">
-        <button
-          className="player-row__btn player-row__btn--edit"
-          title="Rename player"
-          onClick={e => { e.stopPropagation(); setEditing(true); setEditVal(p); }}
-        >✎</button>
-        <button
-          className="player-row__btn player-row__btn--clear"
-          title="Clear this player's assignments"
-          onClick={e => { e.stopPropagation(); onClear(p); }}
-        >↺</button>
-        <button
-          className="player-row__btn player-row__btn--remove"
-          title="Remove player"
-          onClick={e => { e.stopPropagation(); onRemove(p); }}
-        >✕</button>
+        <button className="player-row__btn player-row__btn--edit" title="Rename player"
+          onClick={e => { e.stopPropagation(); setEditing(true); setEditVal(p); }}>✎</button>
+        <button className="player-row__btn player-row__btn--clear" title="Clear this player's assignments"
+          onClick={e => { e.stopPropagation(); onClear(p); }}>↺</button>
+        <button className="player-row__btn player-row__btn--remove" title="Remove player"
+          onClick={e => { e.stopPropagation(); onRemove(p); }}>✕</button>
       </div>
     </div>
   );
@@ -388,7 +588,6 @@ function RegionStrip({ games, region, dir, fp, players, assignments, spreads,
   );
 }
 
-// ── Standings panel — used in both bracket sidebar and bracket tab inline ─────
 function StandingsPanel({ players, scores, eliminationInfo, getColorFn }) {
   if (players.length === 0) return null;
   const elim            = eliminationInfo.eliminated;
@@ -454,28 +653,24 @@ export default function App() {
   const [adminInput, setAdminInput]         = useState('');
   const [adminError, setAdminError]         = useState(false);
 
-  // ── Header + filter bar height measurement ────────────────────────────────
   const headerRef = useRef(null);
   const filterRef = useRef(null);
-  const [headerHeight, setHeaderHeight] = useState(100); // generous default prevents flash
-  const [filterHeight, setFilterHeight] = useState(54);  // generous default
+  const [headerHeight, setHeaderHeight] = useState(100);
+  const [filterHeight, setFilterHeight] = useState(54);
 
   useEffect(() => {
     const observe = (el, setter) => {
       if (!el) return () => {};
-      const ro = new ResizeObserver(() => {
-        setter(el.getBoundingClientRect().height);
-      });
+      const ro = new ResizeObserver(() => setter(el.getBoundingClientRect().height));
       ro.observe(el);
       setter(el.getBoundingClientRect().height);
       return () => ro.disconnect();
     };
     const d1 = observe(headerRef.current, setHeaderHeight);
-    const d2 = observe(filterRef.current,  setFilterHeight);
+    const d2 = observe(filterRef.current, setFilterHeight);
     return () => { d1(); d2(); };
   }, []);
 
-  // ── Storage ────────────────────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
       try {
@@ -496,7 +691,6 @@ export default function App() {
   useEffect(() => { if (storageReady) storage.set(SK_ASSIGNMENTS, JSON.stringify(assignments)).catch(() => {}); }, [assignments, storageReady]);
   useEffect(() => { if (storageReady) storage.set(SK_SPREADS,     JSON.stringify(spreads)).catch(() => {}); }, [spreads, storageReady]);
 
-  // ── Load games ─────────────────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -609,7 +803,6 @@ export default function App() {
     setInputValue('');
   }, [inputValue, players]);
 
-  // Rename a player — updates assignments and selection too
   const editPlayer = useCallback((oldName, newName) => {
     if (!newName || players.includes(newName)) return;
     setPlayers(prev => prev.map(p => p === oldName ? newName : p));
@@ -622,7 +815,6 @@ export default function App() {
     setFilterPlayer(prev => prev === oldName ? newName : prev);
   }, [players]);
 
-  // Clear only a single player's assignments
   const clearPlayerAssignments = useCallback((name) => {
     setAssignments(prev => {
       const n = { ...prev };
@@ -679,11 +871,9 @@ export default function App() {
   const miniProps  = { spreads, focusGame, openCard, closeCard, players, assignments, ownerAtRound, getOwnerFn };
   const stripProps = { games: bracketGames, fp: filterPlayer, players, assignments, spreads, focusGame, openCard, closeCard, ownerAtRound, getOwnerFn };
 
-  // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <div className="app" style={{ paddingTop: headerHeight }} onClick={() => { if (focusGame) closeCard(); }}>
 
-      {/* ── Header ── */}
       <header className="header" ref={headerRef}>
         <div className="header__brand">
           <div className="header__title">🏀 March Madness 2026</div>
@@ -720,8 +910,6 @@ export default function App() {
       {tab === 'setup' && (
         <div className="page page--wide">
           <div className="setup-grid">
-
-            {/* Column 1: Players */}
             <div>
               <div className="section-title">Players</div>
               <PlayerInput value={inputValue} onChange={setInputValue} onAdd={addPlayer} />
@@ -731,14 +919,10 @@ export default function App() {
                 </p>
               )}
               {players.map((p, i) => (
-                <PlayerRow
-                  key={p} p={p} i={i}
+                <PlayerRow key={p} p={p} i={i}
                   isSelected={selectedPlayer === p}
                   onSelect={name => setSelectedPlayer(selectedPlayer === name ? null : name)}
-                  onEdit={editPlayer}
-                  onClear={clearPlayerAssignments}
-                  onRemove={removePlayer}
-                />
+                  onEdit={editPlayer} onClear={clearPlayerAssignments} onRemove={removePlayer} />
               ))}
               {selectedPlayer && (
                 <div className="player-hint">
@@ -756,7 +940,6 @@ export default function App() {
               </div>
             </div>
 
-            {/* Column 2: Assign Teams */}
             <div>
               <div className="section-title">Assign Teams</div>
               <p style={{ fontSize: 12, color: 'var(--text3)', marginBottom: 16, lineHeight: 1.6 }}>
@@ -771,9 +954,7 @@ export default function App() {
                 return (
                   <div key={region} className="teams-grid__region">
                     <div className="teams-grid__region-header">
-                      <span className="teams-grid__region-label" style={{ color: REGION_COLORS[region] || 'var(--text3)' }}>
-                        {region}
-                      </span>
+                      <span className="teams-grid__region-label" style={{ color: REGION_COLORS[region] || 'var(--text3)' }}>{region}</span>
                       {alreadyHere && selectedPlayer && (
                         <span className="teams-grid__region-warning">{selectedPlayer} already picked here</span>
                       )}
@@ -781,7 +962,6 @@ export default function App() {
                     <div className="teams-grid__chips">
                       {teamsByRegion[region].sort((a, b) => (a.seed || 99) - (b.seed || 99)).map(team => {
                         const owner   = assignments[team.id];
-                        const color   = owner ? getColorFn(owner) : 'var(--border2)';
                         const blocked = !!selectedPlayer && !owner && alreadyHere;
                         return (
                           <div key={team.id} className="team-chip"
@@ -804,7 +984,6 @@ export default function App() {
               })}
             </div>
 
-            {/* Column 3: Standings */}
             <div>
               <StandingsPanel {...standingsProps} />
             </div>
@@ -837,8 +1016,6 @@ export default function App() {
       {/* ── BRACKET TAB ── */}
       {tab === 'bracket' && (
         <div className="bracket-page" style={{ paddingTop: filterHeight }}>
-
-          {/* Filter bar: outside the scroll container so it spans full viewport width */}
           <div className="bracket-filters" ref={filterRef} style={{ top: headerHeight }}>
             {['All', ...BRACKET_REGIONS].map(r => (
               <button key={r} onClick={e => { e.stopPropagation(); setActiveRegion(r); }}
@@ -860,7 +1037,6 @@ export default function App() {
             )}
           </div>
 
-          {/* Content row: scrollable games + sticky sidebar */}
           <div className="bracket-layout">
             <div className="bracket-scroll">
               {loading ? (
@@ -905,14 +1081,11 @@ export default function App() {
                 </>
               )}
             </div>
-
-            {/* Sidebar — hidden on mobile via CSS */}
             <div className="bracket-sidebar">
               <StandingsPanel {...standingsProps} />
             </div>
           </div>
 
-          {/* Standings shown below on mobile */}
           {players.length > 0 && (
             <div className="standings-bar">
               <StandingsPanel {...standingsProps} />
@@ -941,13 +1114,6 @@ export default function App() {
           <div className="scroll-hint">← Scroll sideways to see full bracket →</div>
 
           <div className="full-bracket__layout">
-            {/*
-              Standard NCAA bracket layout:
-              Top-left: East (rounds go L→R toward center)
-              Bottom-left: South (rounds go L→R toward center)
-              Top-right: West (rounds go R→L toward center)
-              Bottom-right: Midwest (rounds go R→L toward center)
-            */}
             <div className="bracket-half">
               <RegionStrip region="East"  dir="ltr" {...stripProps} />
               <RegionStrip region="South" dir="ltr" {...stripProps} />
