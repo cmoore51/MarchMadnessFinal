@@ -23,7 +23,10 @@ import './index.css';
 // admin-overridden spread value.
 
 function calcCover(game, spreadOverride) {
-  const spread = spreadOverride ?? game.spread;
+  // Use the override if it's a real number, otherwise fall back to game.spread
+  const spread = (spreadOverride !== undefined && spreadOverride !== null)
+    ? spreadOverride
+    : game.spread;
   if (spread == null) return null;
 
   const home = game.home;
@@ -395,7 +398,7 @@ function TeamSlot({ team, isWinner, isLoser, showScore, round, players, assignme
                     ownerAtRound, getOwner, assignTeam, isAdmin, tab, selectedPlayer }) {
   if (!team) return null;
   const isTBD     = !team.id || team.name === 'TBD';
-  const owner     = isTBD ? null : (round ? ownerAtRound(team.id, round) : getOwner(team.id));
+  const owner     = isTBD ? null : (round ? ownerAtRound(team.id, round, team.name) : getOwner(team.id));
   const color     = owner ? getColor(players, owner) : '#1e2d42';
   const captured  = !isTBD && round && owner && assignments[team.id] && owner !== assignments[team.id];
   const canAssign = isAdmin && tab === 'setup' && selectedPlayer && !isTBD;
@@ -551,7 +554,7 @@ function GameCard({ game, spreads, focusGame, openCard, closeCard, spreadInput, 
 function MiniSlot({ team, isWinner, isLoser, round, players, assignments, ownerAtRound, getOwnerFn }) {
   if (!team) return null;
   const isTBD    = !team.id || team.name === 'TBD';
-  const owner    = isTBD ? null : (round ? ownerAtRound(team.id, round) : getOwnerFn(team.id));
+  const owner    = isTBD ? null : (round ? ownerAtRound(team.id, round, team.name) : getOwnerFn(team.id));
   const color    = owner ? getColor(players, owner) : '#0d1b2a';
   const captured = !isTBD && round && owner && assignments[team.id] && owner !== assignments[team.id];
   return (
@@ -754,36 +757,163 @@ export default function App() {
   useEffect(() => { if (storageReady) storage.set(SK_ASSIGNMENTS, JSON.stringify(assignments)).catch(() => {}); }, [assignments, storageReady]);
   useEffect(() => { if (storageReady) storage.set(SK_SPREADS,     JSON.stringify(spreads)).catch(() => {}); }, [spreads, storageReady]);
 
+  // ── Load + poll games ─────────────────────────────────────────────────────
+  // • Initial load: respect the cache (fast)
+  // • While any game is live: re-fetch every 30s, bypassing the score cache
+  // • While only scheduled games remain: poll every 5min (light touch)
+  // • Once all games are completed: stop polling
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
+    let cancelled  = false;
+    let timerId    = null;
+
+    const LIVE_INTERVAL      = 30  * 1000; // 30s when games are in progress
+    const SCHEDULED_INTERVAL = 5 * 60 * 1000; // 5min when no live games
+
+    const fetchGames = async (forceRefresh = false) => {
       try {
-        const live = await getLiveGames();
-        if (!cancelled) setGames(buildFullBracket(live.length > 0 ? live : makeDemoGames()));
+        const live = await getLiveGames(forceRefresh);
+        if (cancelled) return live;
+        setGames(buildFullBracket(live.length > 0 ? live : makeDemoGames()));
+        return live;
       } catch {
         if (!cancelled) setGames(buildFullBracket(makeDemoGames()));
+        return [];
       }
+    };
+
+    const scheduleNext = (games) => {
+      if (cancelled) return;
+      const hasLive      = games.some(g => g.inProgress);
+      const allDone      = games.length > 0 && games.every(g => g.completed || g._isTBD || g._placeholder);
+      if (allDone) return; // tournament over, stop polling
+      const interval = hasLive ? LIVE_INTERVAL : SCHEDULED_INTERVAL;
+      timerId = setTimeout(poll, interval);
+    };
+
+    const poll = async () => {
+      const games = await fetchGames(true); // always force-refresh on poll
+      scheduleNext(games);
+    };
+
+    // Initial load — use cache if fresh
+    (async () => {
+      const games = await fetchGames(false);
       if (!cancelled) setLoading(false);
+      scheduleNext(games);
     })();
-    return () => { cancelled = true; };
+
+    return () => {
+      cancelled = true;
+      if (timerId) clearTimeout(timerId);
+    };
   }, []);
 
-  // ── Ownership ──────────────────────────────────────────────────────────────
-  const ownership = (() => {
+  // Normalize a team name for fuzzy matching:
+  // strips punctuation, lowercases, collapses spaces
+  function normName(n = '') {
+    return n.toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+  }
+
+  // Build all name variants for a team to maximize match chances
+  function nameVariants(name = '') {
+    const n = normName(name);
+    const variants = new Set([n]);
+    // "michigan state" → also try "michigan st"
+    variants.add(n.replace(/\bstate\b/, 'st'));
+    // "michigan st" → also try "michigan state"
+    variants.add(n.replace(/\bst\b/, 'state'));
+    // first two words only (handles "Florida Atlantic Owls" → "florida atlantic")
+    const words = n.split(' ');
+    if (words.length > 2) variants.add(words.slice(0, 2).join(' '));
+    return [...variants].filter(Boolean);
+  }
+  const { ownership, ownershipAtRound, nameToOwnerAtRound } = (() => {
+    const live = {};
+    Object.entries(assignments).forEach(([tid, p]) => { live[tid] = p; });
+
     const own = {};
     Object.entries(assignments).forEach(([tid, p]) => { own[tid] = { owner: p, capturedFrom: null }; });
-    [...games].filter(g => !g._isTBD).sort((a, b) => a.round - b.round).forEach(g => {
-      if (!g.completed) return;
-      const winner = g.away.winner ? g.away : g.home.winner ? g.home : null;
-      const loser  = winner ? (winner === g.away ? g.home : g.away) : null;
-      if (!winner || !loser) return;
-      const wOwner = own[winner.id]?.owner, lOwner = own[loser.id]?.owner;
-      if (!wOwner && !lOwner) return;
-      const covered = calcCover(g, spreads[g.id]);
-      if (covered === false && lOwner) own[winner.id] = { owner: lOwner, capturedFrom: wOwner || null };
-      else if (wOwner) own[winner.id] = { owner: wOwner, capturedFrom: own[winner.id]?.capturedFrom ?? null };
+
+    const snap = { 1: { ...live } };
+    const nameSnap = {};
+
+    const setNameOwner = (snapObj, teamName, owner) => {
+      if (!teamName || teamName === 'TBD' || !owner) return;
+      nameVariants(teamName).forEach(v => { snapObj[v] = owner; });
+    };
+
+    const getNameOwner = (snapObj, teamName) => {
+      if (!snapObj || !teamName || teamName === 'TBD') return null;
+      for (const v of nameVariants(teamName)) {
+        if (snapObj[v]) return snapObj[v];
+      }
+      return null;
+    };
+
+    // Seed round 1 name map from all R1 games + current assignments
+    nameSnap[1] = {};
+    games.filter(g => g.round === 1 && !g._isTBD && !g._placeholder).forEach(g => {
+      [g.home, g.away].forEach(t => {
+        if (t.id && t.name && t.name !== 'TBD' && live[t.id]) {
+          setNameOwner(nameSnap[1], t.name, live[t.id]);
+        }
+      });
     });
-    return own;
+
+    const completedByRound = {};
+    [...games]
+      .filter(g => !g._isTBD && !g._placeholder && g.completed)
+      .forEach(g => { (completedByRound[g.round] ??= []).push(g); });
+
+    const rounds = Object.keys(completedByRound).map(Number).sort((a, b) => a - b);
+
+    for (const round of rounds) {
+      for (const g of completedByRound[round]) {
+        const winner = g.away.winner ? g.away : g.home.winner ? g.home : null;
+        const loser  = winner ? (winner === g.away ? g.home : g.away) : null;
+        if (!winner?.id || !loser?.id) continue;
+
+        const effectiveSpread = spreads[g.id] !== undefined ? spreads[g.id] : g.spread;
+        const covered = calcCover({ ...g, spread: effectiveSpread }, undefined);
+
+        const wOwner = live[winner.id] ?? getNameOwner(nameSnap[round], winner.name);
+        const lOwner = live[loser.id]  ?? getNameOwner(nameSnap[round], loser.name);
+
+        if (covered === false && lOwner) {
+          live[winner.id] = lOwner;
+          own[winner.id]  = { owner: lOwner, capturedFrom: wOwner ?? null };
+        } else if (wOwner) {
+          live[winner.id] = wOwner;
+          own[winner.id]  = { owner: wOwner, capturedFrom: own[winner.id]?.capturedFrom ?? null };
+        }
+
+        delete live[loser.id];
+        delete own[loser.id];
+      }
+
+      snap[round + 1] = { ...live };
+
+      // Build name snapshot for next round from updated live state
+      nameSnap[round + 1] = {};
+      Object.entries(live).forEach(([tid, owner]) => {
+        if (!owner) return;
+        for (const g of games) {
+          if (g._placeholder) continue;
+          [g.home, g.away].forEach(t => {
+            if (t.id === tid && t.name && t.name !== 'TBD') {
+              setNameOwner(nameSnap[round + 1], t.name, owner);
+            }
+          });
+        }
+      });
+    }
+
+    for (let r = 1; r <= 7; r++) {
+      if (!snap[r]) snap[r] = { ...live };
+      if (!nameSnap[r]) nameSnap[r] = { ...(nameSnap[r - 1] ?? {}) };
+    }
+
+    return { ownership: own, ownershipAtRound: snap, nameToOwnerAtRound: nameSnap };
   })();
 
   const getOwnerFn = useCallback(id => ownership[id]?.owner || null, [ownership]);
@@ -804,13 +934,13 @@ export default function App() {
     players.forEach(p => counts[p] = 0);
     Object.entries(live).forEach(([, p]) => { if (counts[p] !== undefined) counts[p]++; });
     const eliminatedInRound = {};
-    [...games].filter(g => !g._isTBD).sort((a, b) => a.round - b.round).forEach(g => {
-      if (!g.completed) return;
+    [...games].filter(g => !g._isTBD && !g._placeholder && g.completed).sort((a, b) => a.round - b.round).forEach(g => {
       const winner  = g.away.winner ? g.away : g.home.winner ? g.home : null;
       const loser   = winner ? (winner === g.away ? g.home : g.away) : null;
-      if (!winner || !loser) return;
+      if (!winner?.id || !loser?.id) return;
       const wOwner  = live[winner.id], lOwner = live[loser.id];
-      const covered = calcCover(g, spreads[g.id]);
+      const effectiveSpread = spreads[g.id] !== undefined ? spreads[g.id] : g.spread;
+      const covered = calcCover({ ...g, spread: effectiveSpread }, undefined);
       if (covered === false && lOwner) {
         if (wOwner && counts[wOwner] !== undefined) {
           counts[wOwner]--;
@@ -830,28 +960,28 @@ export default function App() {
     return { eliminated, eliminatedInRound };
   })();
 
-  const ownershipAtRound = (() => {
-    const snap = { 1: {} };
-    Object.entries(assignments).forEach(([tid, p]) => { snap[1][tid] = p; });
-    const live = { ...snap[1] };
-    let cur = 1;
-    [...games].filter(g => !g._isTBD).sort((a, b) => a.round - b.round).forEach(g => {
-      if (!g.completed) return;
-      if (g.round > cur) { for (let r = cur + 1; r <= g.round; r++) snap[r] = { ...live }; cur = g.round; }
-      const winner  = g.away.winner ? g.away : g.home.winner ? g.home : null;
-      const loser   = winner ? (winner === g.away ? g.home : g.away) : null;
-      if (!winner || !loser) return;
-      const covered = calcCover(g, spreads[g.id]);
-      if (covered === false && live[loser.id]) live[winner.id] = live[loser.id];
-      delete live[loser.id];
-    });
-    for (let r = cur + 1; r <= 6; r++) { if (!snap[r]) snap[r] = { ...live }; }
-    return snap;
-  })();
-
-  const ownerAtRound = useCallback((tid, round) =>
-    ownershipAtRound[round]?.[tid] ?? ownershipAtRound[1]?.[tid] ?? null,
-  [ownershipAtRound]);
+  // ownerAtRound: returns who owns a team entering a given round.
+  // snap[r] = ownership state after round r-1 completes.
+  // We also build a name→owner index as a fallback for ID mismatches.
+  const ownerAtRound = useCallback((tid, round, teamName) => {
+    if (!tid && !teamName) return null;
+    if (tid) {
+      for (let r = round; r >= 1; r--) {
+        const s = ownershipAtRound[r];
+        if (s && Object.prototype.hasOwnProperty.call(s, tid)) return s[tid] || null;
+      }
+    }
+    if (teamName) {
+      for (let r = round; r >= 1; r--) {
+        const ns = nameToOwnerAtRound[r];
+        if (!ns) continue;
+        for (const v of nameVariants(teamName)) {
+          if (Object.prototype.hasOwnProperty.call(ns, v)) return ns[v] || null;
+        }
+      }
+    }
+    return null;
+  }, [ownershipAtRound, nameToOwnerAtRound]);
 
   // ── Actions ────────────────────────────────────────────────────────────────
   const openCard    = useCallback(g => { setFocusGame(g.id); setSpreadInput((spreads[g.id] ?? g.spread) != null ? String(spreads[g.id] ?? g.spread) : ''); }, [spreads]);

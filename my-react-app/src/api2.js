@@ -13,8 +13,8 @@ const TOURNAMENT_ID = 13434;
 const YEAR          = 2026;
 
 // Cache TTLs
-const RAPID_TTL   = 60  * 1000;   // 60s — re-fetch live scores frequently
-const ESPN_TTL    = 5 * 60 * 1000; // 5min — bracket skeleton changes rarely
+const RAPID_TTL   = 1000;   // 60s — re-fetch live scores frequently
+const ESPN_TTL    = 2 * 60 * 1000; // 5min — bracket skeleton changes rarely
 
 // RapidAPI: 10 req/sec — use max 8 in parallel
 const MAX_PARALLEL = 8;
