@@ -108,19 +108,35 @@ function formatGameTime(timestampSec) {
  * Build a live clock string from RapidAPI status fields.
  * Examples: "H1 14:32", "H2 4:05", "OT 1:12", "HALF"
  */
+/**
+ * Build a live clock string from RapidAPI status fields.
+ */
 function formatLiveClock(status) {
   if (!status) return 'LIVE';
-  // RapidAPI only gives us description — no period number or clock time
-  // e.g. {"code":6,"description":"1st half","type":"inprogress"}
   const desc = (status.description ?? '').toLowerCase().trim();
 
+  // 1. Handle Halftime
   if (desc.includes('halftime') || desc.includes('half time') || desc === 'ht') return 'HALF';
+  
+  // 2. Handle Periods
   if (desc.includes('1st half')  || desc === '1h')    return '1st Half';
   if (desc.includes('2nd half')  || desc === '2h')    return '2nd Half';
-  if (desc.includes('overtime')  || desc.includes('extra time') || desc === 'ot') return 'OT';
+  
+  // 3. Handle Overtime / AET Fix
+  // We catch 'aet' and 'added extra time' specifically here
+  if (
+    desc.includes('overtime') || 
+    desc.includes('extra time') || 
+    desc.includes('aet') || 
+    desc === 'ot'
+  ) {
+    return 'OT';
+  }
+
+  // 4. Handle generic "In Progress"
   if (desc.includes('inprogress') || desc.includes('in progress')) return 'LIVE';
 
-  // Return the raw description capitalised if it's short and meaningful
+  // 5. Default Fallback
   if (desc.length > 0 && desc.length < 25) {
     return status.description.replace(/\b\w/g, c => c.toUpperCase());
   }
@@ -182,12 +198,27 @@ function formatESPNLiveClock(clockData) {
 function mapRapidStatus(s) {
   if (!s) return 'pre';
   const type = s.type ?? -99;
-  const desc = (s.description ?? '').toLowerCase();
-  if (type === 100 || type === 110)                                return 'post';
-  if (desc.includes('ended') || desc.includes('finished')
-    || desc.includes('final'))                                     return 'post';
-  if (type === 0 || type === -1 || type === 120)                   return 'pre';
+  const desc = (s.description ?? '').toLowerCase().trim();
+
+  // 1. Explicit 'Finished' types (100 is usually standard, 110/120 often used for OT/AET)
+  if (type === 100 || type === 110 || type === 120) return 'post';
+
+  // 2. String-based 'Finished' checks
+  if (
+    desc.includes('ended') || 
+    desc.includes('finished') || 
+    desc.includes('final') || 
+    desc === 'ft' || // Full Time
+    desc === 'aet'   // If it says ONLY 'aet' and it's actually over
+  ) {
+    return 'post';
+  }
+
+  // 3. 'Scheduled' types
+  if (type === 0 || type === -1) return 'pre';
   if (desc.includes('not started') || desc.includes('postponed')) return 'pre';
+
+  // 4. Default to 'in' (Live)
   return 'in';
 }
 

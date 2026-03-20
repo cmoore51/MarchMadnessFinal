@@ -93,13 +93,16 @@ function normName(n = '') {
 function nameVariants(name = '') {
   const n = normName(name);
   const variants = new Set([n]);
-  variants.add(n.replace(/\bstate\b/g, 'st'));
-  variants.add(n.replace(/\bst\b/g, 'state'));
-  variants.add(n.replace(/\bsaint\b/g, 'st'));
-  variants.add(n.replace(/\bst\b/g, 'saint'));
+  // Only substitute state↔st when "state" or "st" is a standalone suffix word,
+  // not a prefix (prevents "saint" partial matches etc.)
+  // e.g. "michigan state" → "michigan st", but NOT "michigan" → anything with "state"
+  if (/\bstate$/.test(n)) variants.add(n.replace(/\bstate$/, 'st'));
+  if (/\bst$/.test(n))    variants.add(n.replace(/\bst$/, 'state'));
+  if (/\bsaint\b/.test(n)) variants.add(n.replace(/\bsaint\b/g, 'st'));
+  // first two words only for 3+ word names (e.g. "Florida Atlantic Owls" → "florida atlantic")
   const words = n.split(' ');
   if (words.length > 2) variants.add(words.slice(0, 2).join(' '));
-  if (words.length > 1) variants.add(words[0]);
+  // NO single-word fallback — "michigan" must not match "michigan state"
   return [...variants].filter(v => v.length >= 3);
 }
 
