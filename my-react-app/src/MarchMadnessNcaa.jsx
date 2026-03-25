@@ -764,6 +764,7 @@ export default function App() {
     return () => { d1(); d2(); };
   }, []);
 
+  // ── Load from Supabase on mount ─────────────────────────────────────────────
   useEffect(() => {
     (async () => {
       try {
@@ -772,17 +773,30 @@ export default function App() {
           storage.get(SK_ASSIGNMENTS),
           storage.get(SK_SPREADS),
         ]);
-        if (p) setPlayers(JSON.parse(p.value));
-        if (a) setAssignments(JSON.parse(a.value));
-        if (s) setSpreads(JSON.parse(s.value));
-      } catch { /* no saved data yet */ }
+
+        if (p != null) {
+          const parsed = typeof p === 'string' ? JSON.parse(p) : p;
+          if (Array.isArray(parsed)) setPlayers(parsed);
+        }
+        if (a != null) {
+          const parsed = typeof a === 'string' ? JSON.parse(a) : a;
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) setAssignments(parsed);
+        }
+        if (s != null) {
+          const parsed = typeof s === 'string' ? JSON.parse(s) : s;
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) setSpreads(parsed);
+        }
+      } catch (e) {
+        console.error('Failed to load state from Supabase:', e);
+      }
       setStorageReady(true);
     })();
   }, []);
 
-  useEffect(() => { if (storageReady) storage.set(SK_PLAYERS,     JSON.stringify(players)).catch(() => {}); }, [players, storageReady]);
-  useEffect(() => { if (storageReady) storage.set(SK_ASSIGNMENTS, JSON.stringify(assignments)).catch(() => {}); }, [assignments, storageReady]);
-  useEffect(() => { if (storageReady) storage.set(SK_SPREADS,     JSON.stringify(spreads)).catch(() => {}); }, [spreads, storageReady]);
+  // ── Persist to Supabase on change ───────────────────────────────────────────
+  useEffect(() => { if (storageReady) storage.set(SK_PLAYERS,     players).catch(() => {}); },     [players,     storageReady]);
+  useEffect(() => { if (storageReady) storage.set(SK_ASSIGNMENTS, assignments).catch(() => {}); }, [assignments, storageReady]);
+  useEffect(() => { if (storageReady) storage.set(SK_SPREADS,     spreads).catch(() => {}); },     [spreads,     storageReady]);
 
   // ── Load + poll games ─────────────────────────────────────────────────────
   // • Initial load: respect the cache (fast)
