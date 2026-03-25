@@ -13,7 +13,7 @@ const TOURNAMENT_ID = 13434;
 const YEAR          = 2026;
 
 // Cache TTLs
-const RAPID_TTL   = 1000;
+const RAPID_TTL   = 60 * 1000;
 const ESPN_TTL    = 2 * 60 * 1000;
 
 const MAX_PARALLEL = 8;
@@ -33,7 +33,14 @@ async function loadSpreadStore() {
   if (_spreadStore) return _spreadStore;
   try {
     const res = await storage.get(SPREAD_STORE_KEY);
-    _spreadStore = res?.value ? JSON.parse(res.value) : {};
+    if (res != null) {
+      // Handle both raw object (Supabase JSONB) and legacy string
+      _spreadStore = typeof res === 'string' ? JSON.parse(res) : res;
+      // Safety: must be a plain object
+      if (typeof _spreadStore !== 'object' || Array.isArray(_spreadStore)) _spreadStore = {};
+    } else {
+      _spreadStore = {};
+    }
   } catch {
     _spreadStore = {};
   }
@@ -46,7 +53,8 @@ async function saveSpread(espnId, spread) {
   if (store[espnId] === spread) return;
   store[espnId] = spread;
   try {
-    await storage.set(SPREAD_STORE_KEY, JSON.stringify(store));
+    // Save raw object — Supabase stores native JSONB, no stringify needed
+    await storage.set(SPREAD_STORE_KEY, store);
   } catch (e) {
     console.warn('Spread store save failed:', e.message);
   }
@@ -78,6 +86,25 @@ async function pLimit(tasks, limit) {
     if (i + limit < tasks.length) await sleep(1100);
   }
   return results;
+}
+
+// ─── Storage helpers ──────────────────────────────────────────────────────────
+// Supabase returns raw JSONB values (objects/arrays/strings), NOT { value: "..." }.
+// These helpers normalize reads/writes so nothing else needs to think about it.
+
+function safeParseStorage(raw) {
+  if (raw == null) return null;
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw); } catch { return null; }
+  }
+  return raw; // already parsed object/array from JSONB
+}
+
+function safeParseTimestamp(raw) {
+  if (raw == null) return null;
+  // Could be a number, a string "1711234567890", or an object if something went wrong
+  const n = parseInt(typeof raw === 'object' ? JSON.stringify(raw) : String(raw), 10);
+  return isNaN(n) ? null : n;
 }
 
 // ─── Date / time formatting ───────────────────────────────────────────────────
@@ -185,7 +212,6 @@ function shapeRapidGame(g) {
     spread:      null,
     home: {
       id:     String(g.homeTeam?.id ?? ''),
-      // Store RapidAPI name temporarily — will be overwritten by ESPN name in merge
       name:   g.homeTeam?.shortName || g.homeTeam?.name || '',
       abbr:   (g.homeTeam?.nameCode ?? g.homeTeam?.shortName ?? '').toUpperCase(),
       seed:   g.homeTeam?.ranking ?? null,
@@ -209,12 +235,15 @@ async function fetchRapidGames() {
 
   try {
     const [cached, ts] = await Promise.all([storage.get(CACHE_KEY), storage.get(TS_KEY)]);
-    if (cached?.value && ts?.value) {
-      const age = Date.now() - parseInt(ts.value, 10);
+    const tsVal = safeParseTimestamp(ts);
+    if (cached != null && tsVal != null) {
+      const age = Date.now() - tsVal;
       if (age < RAPID_TTL) {
-        const games = JSON.parse(cached.value);
-        console.log(`RapidAPI: ${games.length} games from cache (${Math.round(age/1000)}s old)`);
-        return games;
+        const games = safeParseStorage(cached);
+        if (Array.isArray(games)) {
+          console.log(`RapidAPI: ${games.length} games from cache (${Math.round(age/1000)}s old)`);
+          return games;
+        }
       }
     }
   } catch { /* miss */ }
@@ -257,8 +286,9 @@ async function fetchRapidGames() {
 
   if (shaped.length > 0) {
     try {
+      // Save raw array — Supabase stores native JSONB
       await Promise.all([
-        storage.set(CACHE_KEY, JSON.stringify(shaped)),
+        storage.set(CACHE_KEY, shaped),
         storage.set(TS_KEY,    String(Date.now())),
       ]);
     } catch (e) { console.warn('RapidAPI cache save failed:', e.message); }
@@ -298,30 +328,29 @@ async function fetchESPNSkeleton() {
 
   try {
     const [cached, ts] = await Promise.all([storage.get(ESPN_CACHE_KEY), storage.get(ESPN_TS_KEY)]);
-    if (cached?.value && ts?.value) {
-      const age = Date.now() - parseInt(ts.value, 10);
+    const tsVal = safeParseTimestamp(ts);
+    if (cached != null && tsVal != null) {
+      const age = Date.now() - tsVal;
       if (age < ESPN_TTL) {
-        const skeleton = JSON.parse(cached.value);
-
-        // ── KEY FIX: Re-hydrate spreads from persistent store on every cache hit ──
-        // ESPN drops odds once games go live. The cache snapshot may have null spreads
-        // for games that had odds earlier. Re-applying the store fixes this without
-        // invalidating the whole cache.
-        const store = await loadSpreadStore();
-        let updated = false;
-        for (const entry of Object.values(skeleton)) {
-          if (entry.espnId && entry.spread == null && store[entry.espnId] != null) {
-            entry.spread = store[entry.espnId];
-            updated = true;
+        const skeleton = safeParseStorage(cached);
+        if (skeleton && typeof skeleton === 'object' && !Array.isArray(skeleton)) {
+          // Re-hydrate spreads from persistent store on every cache hit.
+          // ESPN drops odds once games go live — the store recovers them.
+          const store = await loadSpreadStore();
+          let updated = false;
+          for (const entry of Object.values(skeleton)) {
+            if (entry.espnId && entry.spread == null && store[entry.espnId] != null) {
+              entry.spread = store[entry.espnId];
+              updated = true;
+            }
           }
+          if (updated) {
+            // Save raw object back — no stringify
+            storage.set(ESPN_CACHE_KEY, skeleton).catch(() => {});
+          }
+          console.log(`ESPN skeleton: ${Object.keys(skeleton).length} entries from cache`);
+          return skeleton;
         }
-        if (updated) {
-          // Save updated skeleton back to cache so future hits also have the spreads
-          storage.set(ESPN_CACHE_KEY, JSON.stringify(skeleton)).catch(() => {});
-        }
-
-        console.log(`ESPN skeleton: ${Object.keys(skeleton).length} entries from cache`);
-        return skeleton;
       }
     }
   } catch { /* miss */ }
@@ -372,9 +401,6 @@ async function fetchESPNSkeleton() {
     const homeAbbr  = (home.team.abbreviation ?? '').toUpperCase();
     const awayAbbr  = (away.team.abbreviation ?? '').toUpperCase();
 
-    // ── KEY FIX: Always use ESPN's canonical display name ──
-    // shortDisplayName = "Iowa", displayName = "Iowa Hawkeyes"
-    // We always prefer shortDisplayName for brevity and consistency.
     const homeName  = home.team.shortDisplayName || home.team.displayName || homeAbbr;
     const awayName  = away.team.shortDisplayName || away.team.displayName || awayAbbr;
 
@@ -405,6 +431,7 @@ async function fetchESPNSkeleton() {
     // Spread: read from ESPN odds, persist it, or fall back to stored value
     let spread = null;
     const odds = comp.odds?.[0];
+
     if (odds) {
       const sp = odds.spread ?? odds.homeTeamOdds?.pointSpread?.alternateDisplayValue;
       if (sp != null) {
@@ -426,7 +453,6 @@ async function fetchESPNSkeleton() {
       region,
       roundLabel:  ROUND_LABELS[round] ?? `Round ${round}`,
       homeSeed,    awaySeed,
-      // These are the canonical ESPN names — used in the merge to overwrite RapidAPI names
       homeName:    homeTBD ? 'TBD' : homeName,
       awayName:    awayTBD ? 'TBD' : awayName,
       homeAbbr:    homeTBD ? 'TBD' : homeAbbr,
@@ -451,8 +477,9 @@ async function fetchESPNSkeleton() {
 
   if (Object.keys(skeleton).length > 10) {
     try {
+      // Save raw object — Supabase stores native JSONB
       await Promise.all([
-        storage.set(ESPN_CACHE_KEY, JSON.stringify(skeleton)),
+        storage.set(ESPN_CACHE_KEY, skeleton),
         storage.set(ESPN_TS_KEY,    String(Date.now())),
       ]);
     } catch (e) { console.warn('ESPN skeleton cache failed:', e.message); }
@@ -483,7 +510,6 @@ const NAME_ALIASES = {
   'maryland baltimore': 'umbc',
   'prairie view':       'prairie view',
   'lehigh mountain':    'lehigh',
-  // RapidAPI sometimes sends full mascot names — strip them for matching only
   'iowa hawkeyes':      'iowa',
   'duke blue devils':   'duke',
   'kansas jayhawks':    'kansas',
@@ -593,8 +619,6 @@ function mergeRapidWithESPN(rapidGames, skeleton, liveClocks = {}) {
         spread:      meta.spread ?? null,
         home: {
           ...rg.home,
-          // ── KEY FIX: ESPN name is canonical — always wins over RapidAPI name ──
-          // This ensures "Iowa" not "Iowa Hawkeyes", "Duke" not "Duke Blue Devils", etc.
           name: meta.homeName && meta.homeName !== 'TBD' ? meta.homeName : rg.home.name,
           abbr: meta.homeAbbr && meta.homeAbbr !== 'TBD' ? meta.homeAbbr : rg.home.abbr,
           seed: rg.home.seed ?? meta.homeSeed,
@@ -656,7 +680,14 @@ function mergeRapidWithESPN(rapidGames, skeleton, liveClocks = {}) {
     });
   }
 
-  const valid = enriched.filter(g => g.round != null && g.region != null);
+  const seen = new Set();
+  const valid = enriched.filter(g => {
+    if (g.round == null || g.region == null) return false;
+    const key = g.id;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 
   const regionOrder = ['South', 'East', 'Midwest', 'West', 'Final Four', 'Championship'];
   valid.sort((a, b) => {

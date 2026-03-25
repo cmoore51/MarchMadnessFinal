@@ -775,6 +775,7 @@ export default function App() {
         ]);
 
         if (p != null) {
+          // Handle both raw JSONB (array/object) and legacy double-encoded strings
           const parsed = typeof p === 'string' ? JSON.parse(p) : p;
           if (Array.isArray(parsed)) setPlayers(parsed);
         }
