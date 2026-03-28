@@ -47,22 +47,22 @@ async function loadSpreadStore() {
   return _spreadStore;
 }
 
-async function saveSpread(espnId, spread) {
+// In saveSpread, also save under stable key
+async function saveSpread(espnId, spread, stableKey = null) {
   if (!espnId || spread == null) return;
   const store = await loadSpreadStore();
-  if (store[espnId] === spread) return;
-  store[espnId] = spread;
-  try {
-    // Save raw object — Supabase stores native JSONB, no stringify needed
-    await storage.set(SPREAD_STORE_KEY, store);
-  } catch (e) {
-    console.warn('Spread store save failed:', e.message);
-  }
+  let changed = false;
+  if (store[espnId] !== spread) { store[espnId] = spread; changed = true; }
+  if (stableKey && store[stableKey] !== spread) { store[stableKey] = spread; changed = true; }
+  if (!changed) return;
+  try { await storage.set(SPREAD_STORE_KEY, store); } 
+  catch (e) { console.warn('Spread store save failed:', e.message); }
 }
 
-async function getStoredSpread(espnId) {
+// In getStoredSpread, accept either key
+async function getStoredSpread(espnId, stableKey = null) {
   const store = await loadSpreadStore();
-  return store[espnId] ?? null;
+  return store[espnId] ?? (stableKey ? store[stableKey] : null) ?? null;
 }
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
@@ -276,13 +276,35 @@ async function fetchRapidGames() {
   const results  = await pLimit(dates.map(d => fetchDate(d)), MAX_PARALLEL);
   const rawGames = results.flat().filter(Boolean);
 
-  const shaped = rawGames.map(shapeRapidGame).filter(g => {
-    const homeSeed = g.home?.seed;
-    const awaySeed = g.away?.seed;
-    const isFirstFour = (homeSeed != null && awaySeed != null && homeSeed === awaySeed) || g.round === 0;
-    if (isFirstFour) console.log(`Filtered First Four: ${g.away.name} vs ${g.home.name}`);
-    return !isFirstFour;
-  });
+const FIRST_FOUR_TEAMS = new Set([
+  'maryland baltimore', 'howard',
+  'texas', 'nc state',
+  'prairie view', 'lehigh',
+  'miami ohio', 'south methodist', 'smu',
+]);
+
+const shaped = rawGames.map(shapeRapidGame).filter(g => {
+  // Original seed-equality check
+  const homeSeed = g.home?.seed;
+  const awaySeed = g.away?.seed;
+  if ((homeSeed != null && awaySeed != null && homeSeed === awaySeed) || g.round === 0) {
+    console.log(`Filtered First Four (seed match): ${g.away.name} vs ${g.home.name}`);
+    return false;
+  }
+  // Name-based check for known First Four teams that slipped through
+  const hn = normAlias(norm(g.home?.name ?? ''));
+  const an = normAlias(norm(g.away?.name ?? ''));
+  if (FIRST_FOUR_TEAMS.has(hn) || FIRST_FOUR_TEAMS.has(an)) {
+    // Only filter if NEITHER team has a seed that places them in the main bracket
+    // (i.e. don't accidentally filter a real Round 1 game involving e.g. Texas)
+    const isLowSeed = (homeSeed == null || homeSeed >= 16) && (awaySeed == null || awaySeed >= 16);
+    if (isLowSeed) {
+      console.log(`Filtered First Four (name match): ${g.away.name} vs ${g.home.name}`);
+      return false;
+    }
+  }
+  return true;
+});
 
   if (shaped.length > 0) {
     try {
@@ -323,7 +345,6 @@ async function fetchESPNSkeleton() {
   const ESPN_CACHE_KEY = `espn_skeleton_${YEAR}_v6`;
   const ESPN_TS_KEY    = `espn_skeleton_ts_${YEAR}_v6`;
 
-  // Always pre-load spread store so getStoredSpread() is fast
   await loadSpreadStore();
 
   try {
@@ -334,18 +355,20 @@ async function fetchESPNSkeleton() {
       if (age < ESPN_TTL) {
         const skeleton = safeParseStorage(cached);
         if (skeleton && typeof skeleton === 'object' && !Array.isArray(skeleton)) {
-          // Re-hydrate spreads from persistent store on every cache hit.
-          // ESPN drops odds once games go live — the store recovers them.
           const store = await loadSpreadStore();
           let updated = false;
           for (const entry of Object.values(skeleton)) {
-            if (entry.espnId && entry.spread == null && store[entry.espnId] != null) {
-              entry.spread = store[entry.espnId];
-              updated = true;
+            if (entry.espnId && entry.spread == null) {
+              // Try both espnId and stableKey
+              const stableKey = entry.stableKey ?? null;
+              const stored = store[entry.espnId] ?? (stableKey ? store[stableKey] : null) ?? null;
+              if (stored != null) {
+                entry.spread = stored;
+                updated = true;
+              }
             }
           }
           if (updated) {
-            // Save raw object back — no stringify
             storage.set(ESPN_CACHE_KEY, skeleton).catch(() => {});
           }
           console.log(`ESPN skeleton: ${Object.keys(skeleton).length} entries from cache`);
@@ -428,7 +451,15 @@ async function fetchESPNSkeleton() {
       if (!isNaN(d)) gameTime = formatGameTime(Math.floor(d.getTime() / 1000));
     }
 
-    // Spread: read from ESPN odds, persist it, or fall back to stored value
+    // Build stable key from region + round + seeds (survives API source changes)
+    const s1 = Math.min(homeSeed ?? 99, awaySeed ?? 99);
+    const s2 = Math.max(homeSeed ?? 99, awaySeed ?? 99);
+    const stableKey = (region && round && s1 !== 99)
+      ? `stable_${region}_r${round}_${s1}v${s2}`
+      : null;
+
+    // Spread: read from ESPN odds, persist under both espnId and stableKey,
+    // or fall back to stored value via either key
     let spread = null;
     const odds = comp.odds?.[0];
 
@@ -440,15 +471,16 @@ async function fetchESPNSkeleton() {
       }
     }
     if (spread != null) {
-      saveSpread(ev.id, spread); // fire-and-forget persist
+      saveSpread(ev.id, spread, stableKey); // persist under both keys
     } else {
-      spread = await getStoredSpread(ev.id); // recover from persistent store
+      spread = await getStoredSpread(ev.id, stableKey); // recover via either key
     }
 
     const statusDetail = completed ? 'FINAL' : (gameTime ?? '');
 
     const entry = {
       espnId:      ev.id,
+      stableKey,                              // stored on the entry for cache-hit recovery
       round,
       region,
       roundLabel:  ROUND_LABELS[round] ?? `Round ${round}`,
@@ -477,7 +509,6 @@ async function fetchESPNSkeleton() {
 
   if (Object.keys(skeleton).length > 10) {
     try {
-      // Save raw object — Supabase stores native JSONB
       await Promise.all([
         storage.set(ESPN_CACHE_KEY, skeleton),
         storage.set(ESPN_TS_KEY,    String(Date.now())),

@@ -86,6 +86,19 @@ const ROUND1_SEEDS = [
 ];
 
 // ── Name normalization — used everywhere IDs might mismatch ──────────────────
+function stableGameKey(game) {
+  if (!game) return null;
+  // Use ESPN ID if available (most stable)
+  if (game.id && game.id.startsWith('espn_')) return game.id;
+  // Fall back to region+round+seeds — never changes regardless of API source
+  const s1 = Math.min(game.away?.seed ?? 99, game.home?.seed ?? 99);
+  const s2 = Math.max(game.away?.seed ?? 99, game.home?.seed ?? 99);
+  if (game.region && game.round && s1 !== 99) {
+    return `stable_${game.region}_r${game.round}_${s1}v${s2}`;
+  }
+  return game.id; // last resort
+}
+
 function normName(n = '') {
   return n.toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
 }
@@ -415,16 +428,14 @@ function PlayerRow({ p, i, isSelected, onSelect, onEdit, onClear, onRemove }) {
   );
 }
 
-function TeamSlot({ team, isWinner, isLoser, showScore, round, players, assignments,
-                    ownerAtRound, getOwner, assignTeam, isAdmin, tab, selectedPlayer, ownership }) {
+function TeamSlot({ team, isWinner, isLoser, showScore, round, players,
+                    ownerAtRound, getOwner, assignTeam, isAdmin, tab, selectedPlayer }) {
   if (!team) return null;
   const isTBD     = !team.id || team.name === 'TBD';
   const owner     = isTBD ? null : (round ? ownerAtRound(team.id, round, team.name) : getOwner(team.id));
   const color     = owner ? getColor(players, owner) : '#1e2d42';
-  const originalOwner = assignments[team.id] ?? ownerAtRound(team.id, 1, team.name);
-  const ownershipEntry = ownership?.[team.id]
-    ?? (team.name ? nameVariants(team.name).map(v => ownership?.[`name:${v}`]).find(Boolean) : null);
-  const captured  = !isTBD && !!ownershipEntry?.capturedFrom && owner && originalOwner && owner !== originalOwner;
+  const prevOwner = !isTBD && round > 1 ? ownerAtRound(team.id, round - 1, team.name) : null;
+  const captured  = !isTBD && !!owner && !!prevOwner && owner !== prevOwner;
   const canAssign = isAdmin && tab === 'setup' && selectedPlayer && !isTBD;
   return (
     <div
@@ -468,10 +479,10 @@ function SpreadPopupBody({ game, fixed, spreads, spreadInput, setSpreadInput,
     );
   }
 
-  const spread     = spreads[game.id] ?? game.spread;
+  const spread     = spreads[stableGameKey(game)] ?? game.spread;
   const winner     = game.away.winner ? game.away : game.home.winner ? game.home : null;
   const loser      = winner ? (winner === game.away ? game.home : game.away) : null;
-  const covered    = winner && loser ? calcCover(game, spreads[game.id]) : null;
+  const covered    = winner && loser ? calcCover(game, spreads[stableGameKey(game)]) : null;
 
   // Determine if this was an upset (underdog won) for messaging
   const favorite   = spread != null && spread !== 0 ? (spread < 0 ? game.home : game.away) : null;
@@ -513,7 +524,7 @@ function SpreadPopupBody({ game, fixed, spreads, spreadInput, setSpreadInput,
                 onKeyDown={e => { if (e.key === 'Enter') saveSpread(game.id); if (e.key === 'Escape') closeCard(); }}
                 placeholder="-7 or +5" />
               <button className="spread-popup__save" onClick={() => saveSpread(game.id)}>✓</button>
-              {spreads[game.id] !== undefined && (
+              {spreads[stableGameKey(game)] !== undefined && (
                 <button className="spread-popup__clear" onClick={() => clearSpread(game.id)}>✕</button>
               )}
             </div>
@@ -530,10 +541,10 @@ function GameCard({ game, spreads, focusGame, openCard, closeCard, spreadInput, 
                     saveSpread, clearSpread, players, assignments, ownerAtRound, getOwnerFn,
                     isAdmin, tab, selectedPlayer, assignTeam, ownership }) {
   const isTBD     = game._isTBD;
-  const spread    = isTBD ? null : (spreads[game.id] ?? game.spread);
+  const spread    = isTBD ? null : (spreads[stableGameKey(game)] ?? game.spread);
   const winner    = isTBD ? null : (game.away.winner ? game.away : game.home.winner ? game.home : null);
   const loser     = winner ? (winner === game.away ? game.home : game.away) : null;
-  const covered   = winner && loser ? calcCover(game, spreads[game.id]) : null;
+  const covered   = winner && loser ? calcCover(game, spreads[stableGameKey(game)]) : null;
   const favorite  = spread != null && spread !== 0 ? (spread < 0 ? game.home : game.away) : null;
   const isUpset   = winner && favorite && winner.id !== favorite.id;
   const hasScores = !isTBD && (game.away.score != null || game.home.score != null);
@@ -575,15 +586,13 @@ function GameCard({ game, spreads, focusGame, openCard, closeCard, spreadInput, 
   );
 }
 
-function MiniSlot({ team, isWinner, isLoser, round, players, assignments, ownerAtRound, getOwnerFn, ownership }) {
+function MiniSlot({ team, isWinner, isLoser, round, players, ownerAtRound, getOwnerFn }) {
   if (!team) return null;
   const isTBD    = !team.id || team.name === 'TBD';
   const owner    = isTBD ? null : (round ? ownerAtRound(team.id, round, team.name) : getOwnerFn(team.id));
   const color    = owner ? getColor(players, owner) : '#0d1b2a';
-  const originalOwner = assignments[team.id] ?? ownerAtRound(team.id, 1, team.name);
-  const ownershipEntry = ownership?.[team.id]
-    ?? (team.name ? nameVariants(team.name).map(v => ownership?.[`name:${v}`]).find(Boolean) : null);
-  const captured = !isTBD && !!ownershipEntry?.capturedFrom && owner && originalOwner && owner !== originalOwner;
+  const prevOwner = !isTBD && round > 1 ? ownerAtRound(team.id, round - 1, team.name) : null;
+  const captured  = !isTBD && !!owner && !!prevOwner && owner !== prevOwner;
   return (
     <div className={['mini-slot', isWinner && 'mini-slot--winner', isLoser && 'mini-slot--loser', isTBD && 'mini-slot--tbd'].filter(Boolean).join(' ')}
       style={{ borderLeft: `3px solid ${isTBD ? '#1e2d3e' : color}` }}>
@@ -603,10 +612,10 @@ function MiniSlot({ team, isWinner, isLoser, round, players, assignments, ownerA
 function MiniCard({ game, spreads, focusGame, openCard, closeCard, players, assignments, ownerAtRound, getOwnerFn, ownership }) {
   if (!game) return <div className="mini-card--placeholder" />;
   const isTBD     = game._isTBD;
-  const spread    = isTBD ? null : (spreads[game.id] ?? game.spread);
+  const spread    = isTBD ? null : (spreads[stableGameKey(game)] ?? game.spread);
   const winner    = isTBD ? null : (game.away.winner ? game.away : game.home.winner ? game.home : null);
   const loser     = winner ? (winner === game.away ? game.home : game.away) : null;
-  const covered   = winner && loser ? calcCover(game, spreads[game.id]) : null;
+  const covered   = winner && loser ? calcCover(game, spreads[stableGameKey(game)]) : null;
   const favorite  = spread != null && spread !== 0 ? (spread < 0 ? game.home : game.away) : null;
   const isUpset   = winner && favorite && winner.id !== favorite.id;
   const sc        = isUpset
@@ -892,6 +901,9 @@ export default function App() {
     const rounds = Object.keys(completedByRound).map(Number).sort((a, b) => a - b);
 
     for (const round of rounds) {
+      snap[round] = snap[round] ?? { ...live };
+      nameSnap[round] = nameSnap[round] ?? { ...nameSnap[round - 1] ?? {} };
+
       for (const g of completedByRound[round]) {
         const winner = g.away.winner ? g.away : g.home.winner ? g.home : null;
         const loser  = winner ? (winner === g.away ? g.home : g.away) : null;
