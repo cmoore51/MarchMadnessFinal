@@ -283,25 +283,24 @@ const FIRST_FOUR_TEAMS = new Set([
   'miami ohio', 'south methodist', 'smu',
 ]);
 
+// Inside fetchRapidGames .filter() or .map()
 const shaped = rawGames.map(shapeRapidGame).filter(g => {
-  // Original seed-equality check
+  // 1. Explicit Round 0
+  if (g.round === 0) return false;
+
   const homeSeed = g.home?.seed;
   const awaySeed = g.away?.seed;
-  if ((homeSeed != null && awaySeed != null && homeSeed === awaySeed) || g.round === 0) {
-    console.log(`Filtered First Four (seed match): ${g.away.name} vs ${g.home.name}`);
-    return false;
-  }
-  // Name-based check for known First Four teams that slipped through
-  const hn = normAlias(norm(g.home?.name ?? ''));
-  const an = normAlias(norm(g.away?.name ?? ''));
-  if (FIRST_FOUR_TEAMS.has(hn) || FIRST_FOUR_TEAMS.has(an)) {
-    // Only filter if NEITHER team has a seed that places them in the main bracket
-    // (i.e. don't accidentally filter a real Round 1 game involving e.g. Texas)
-    const isLowSeed = (homeSeed == null || homeSeed >= 16) && (awaySeed == null || awaySeed >= 16);
-    if (isLowSeed) {
-      console.log(`Filtered First Four (name match): ${g.away.name} vs ${g.home.name}`);
-      return false;
+  const isSameSeed = homeSeed != null && awaySeed != null && homeSeed === awaySeed;
+
+  if (isSameSeed) {
+    // LOGIC FIX: If the game is COMPLETED, we need to know who won 
+    // to map them to the Round 1 game. 
+    if (g.completed) {
+       const winner = g.home.winner ? g.home : g.away;
+       // We log this so we know which team is "advancing" from the play-in
+       console.log(`First Four Winner: ${winner.name} (Seed ${winner.seed})`);
     }
+    return false; // Still filter from the main list so it doesn't show in the bracket
   }
   return true;
 });
@@ -735,6 +734,19 @@ function mergeRapidWithESPN(rapidGames, skeleton, liveClocks = {}) {
 }
 
 // ─── Main export ──────────────────────────────────────────────────────────────
+// Export a map of ESPN teamId → team name, built from the skeleton cache
+export async function getESPNTeamNameMap() {
+  const skeleton = await fetchESPNSkeleton();
+  const map = {}; // espnTeamId → name
+  const seen = new Set();
+  for (const entry of Object.values(skeleton)) {
+    if (seen.has(entry.espnId)) continue;
+    seen.add(entry.espnId);
+    if (entry.homeId) map[entry.homeId] = entry.homeName;
+    if (entry.awayId) map[entry.awayId] = entry.awayName;
+  }
+  return map;
+}
 
 export async function getLiveGames() {
   if (fetchPromise) return fetchPromise;
