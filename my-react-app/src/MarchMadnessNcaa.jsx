@@ -1354,9 +1354,9 @@ export default function App() {
 
             <div className="bracket-center">
               <div className="bracket-center__label bracket-center__label--ff">Final Four</div>
-              {ff[0] && (
-                <div className={filterPlayer === 'All' || (!ff[0]._isTBD && [ff[0].away, ff[0].home].some(t => t.id && ownerAtRound(t.id, 5) === filterPlayer)) ? 'fade-full' : 'fade-dim'}>
-                  <MiniCard game={ff[0]} {...miniProps} />
+              {ff[1] && (
+                <div className={filterPlayer === 'All' || (!ff[1]._isTBD && [ff[1].away, ff[1].home].some(t => t.id && ownerAtRound(t.id, 5) === filterPlayer)) ? 'fade-full' : 'fade-dim'}>
+                  <MiniCard game={ff[1]} {...miniProps} />
                 </div>
               )}
               <div className="bracket-center__spacer" />
@@ -1367,9 +1367,9 @@ export default function App() {
                 </div>
               )}
               <div className="bracket-center__spacer" />
-              {ff[1] && (
-                <div className={filterPlayer === 'All' || (!ff[1]._isTBD && [ff[1].away, ff[1].home].some(t => t.id && ownerAtRound(t.id, 5) === filterPlayer)) ? 'fade-full' : 'fade-dim'}>
-                  <MiniCard game={ff[1]} {...miniProps} />
+              {ff[0] && (
+                <div className={filterPlayer === 'All' || (!ff[0]._isTBD && [ff[0].away, ff[0].home].some(t => t.id && ownerAtRound(t.id, 5) === filterPlayer)) ? 'fade-full' : 'fade-dim'}>
+                  <MiniCard game={ff[0]} {...miniProps} />
                 </div>
               )}
             </div>

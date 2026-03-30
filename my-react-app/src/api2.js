@@ -26,7 +26,7 @@ let fetchPromise = null;
 // Stores ESPN-sourced spreads keyed by ESPN game ID.
 // Write-only — once saved, never overwritten with null.
 
-const SPREAD_STORE_KEY = `espn_spreads_${YEAR}_v1`;
+const SPREAD_STORE_KEY = `espn_spreads_${YEAR}`;
 let _spreadStore = null;
 
 async function loadSpreadStore() {
@@ -230,8 +230,8 @@ function shapeRapidGame(g) {
 }
 
 async function fetchRapidGames() {
-  const CACHE_KEY = `rapid_games_${YEAR}_v5`;
-  const TS_KEY    = `rapid_ts_${YEAR}_v5`;
+  const CACHE_KEY = `rapid_games_${YEAR}`;
+  const TS_KEY    = `rapid_ts_${YEAR}`;
 
   try {
     const [cached, ts] = await Promise.all([storage.get(CACHE_KEY), storage.get(TS_KEY)]);
@@ -341,8 +341,8 @@ function parseESPNRegion(note = '') {
 }
 
 async function fetchESPNSkeleton() {
-  const ESPN_CACHE_KEY = `espn_skeleton_${YEAR}_v6`;
-  const ESPN_TS_KEY    = `espn_skeleton_ts_${YEAR}_v6`;
+  const ESPN_CACHE_KEY = `espn_skeleton_${YEAR}`;
+  const ESPN_TS_KEY    = `espn_skeleton_ts_${YEAR}`;
 
   await loadSpreadStore();
 
@@ -379,19 +379,17 @@ async function fetchESPNSkeleton() {
 
   console.log('ESPN: fetching bracket skeleton…');
 
-  const start    = new Date('2026-03-15');
-  const rangeEnd = new Date('2026-04-15');
-  const dates    = [];
-  const cur      = new Date(start);
-  while (cur <= rangeEnd) {
-    dates.push(cur.toISOString().split('T')[0].replace(/-/g, ''));
-    cur.setDate(cur.getDate() + 1);
-  }
+  const TOURNAMENT_DATES = [
+    '20260319',
+    '20260320','20260321','20260322','20260326',
+    '20260327','20260328','20260329','20260404',
+    '20260406',                     
+  ];
 
   const allEvents = [];
   const seen      = new Set();
 
-  await Promise.all(dates.map(async ds => {
+  await Promise.all(TOURNAMENT_DATES.map(async ds => {
     try {
       const url  = `https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard?dates=${ds}&groups=100&limit=50`;
       const data = await fetch(url).then(r => r.json()).catch(() => ({}));
@@ -783,9 +781,9 @@ export async function getLiveGames() {
 
 export const clearAllCache = async () => {
   const keys = [
-    `rapid_games_${YEAR}_v5`,   `rapid_ts_${YEAR}_v5`,
-    `espn_skeleton_${YEAR}_v6`, `espn_skeleton_ts_${YEAR}_v6`,
-    `espn_spreads_${YEAR}_v1`,
+    `rapid_games_${YEAR}`,   `rapid_ts_${YEAR}`,
+    `espn_skeleton_${YEAR}`, `espn_skeleton_ts_${YEAR}`,
+    `espn_spreads_${YEAR}`,
   ];
   await Promise.all(keys.map(k => storage.delete(k).catch(() => {})));
   _spreadStore = null;
@@ -795,8 +793,8 @@ export const clearAllCache = async () => {
 
 export const clearGameCache = async () => {
   await Promise.all([
-    storage.delete(`rapid_games_${YEAR}_v5`),
-    storage.delete(`rapid_ts_${YEAR}_v5`),
+    storage.delete(`rapid_games_${YEAR}`),
+    storage.delete(`rapid_ts_${YEAR}`),
   ]);
   console.log('RapidAPI cache cleared');
   window.location.reload();
@@ -804,8 +802,8 @@ export const clearGameCache = async () => {
 
 export const clearESPNMeta = async () => {
   await Promise.all([
-    storage.delete(`espn_skeleton_${YEAR}_v6`),
-    storage.delete(`espn_skeleton_ts_${YEAR}_v6`),
+    storage.delete(`espn_skeleton_${YEAR}`),
+    storage.delete(`espn_skeleton_ts_${YEAR}`),
   ]);
   console.log('ESPN skeleton cache cleared');
   window.location.reload();
